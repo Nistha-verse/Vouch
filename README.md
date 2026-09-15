@@ -1,212 +1,485 @@
-# vouch
+# Vouch
 
-A Midnight Network smart contract scaffolded with create-mn-app.
+## Private AI Agent Wallet with Enforced Spending Rules on Midnight
 
-## Quick start
+> Give your AI the ability to act, not the ability to take.
 
-Requirements: Node 22, Docker (with Compose v2), and the Compact compiler at the version pinned in `.compact-version` at the create-mn-app repo root (the version this project was scaffolded against).
+Vouch is a privacy-preserving authorization wallet for autonomous AI agents.
 
-> **On Windows:** the npm scripts in this project run natively (PowerShell or cmd.exe), but the Compact compiler publishes no native Windows binary — so `npm run compile`, and `npm run setup` which calls it, need to run inside WSL. See Midnight's [installation docs](https://docs.midnight.network/getting-started/installation).
+Instead of giving an AI agent unrestricted access to a user's wallet, Vouch gives the agent a limited set of permissions. Spending rules are designed to be enforced through Midnight's privacy-preserving smart contract infrastructure.
 
-```bash
-npm install
-npm run setup
-npm run test:e2e
-```
+The goal is simple:
 
-`npm run setup` runs end-to-end with no prompts:
+An AI agent should be able to act on your behalf without being given unrestricted control of your money.
 
-1. `docker compose up -d --wait` — starts a local Midnight devnet (node, indexer, proof-server) and blocks until all three pass their healthchecks.
-2. `npm run compile` — compiles `contracts/hello-world.compact` to `contracts/managed/hello-world/`.
-3. `npm run deploy` — derives the genesis-seed wallet (NIGHT pre-minted), registers UTXOs for DUST generation, deploys the contract, writes `.midnight-state.json`.
+---
 
-`npm run test:e2e` reconnects to the deployed contract and reads its ledger state. Exits 0 if the contract is live and indexable.
+## The Problem
 
-## Local devnet
+Autonomous AI agents are becoming capable of performing tasks independently, including:
 
-The project ships its own devnet via `docker-compose.yml`:
+- Purchasing API credits
+- Paying for digital services
+- Acquiring resources
+- Completing tasks that require payments
+- Interacting with other autonomous systems
 
-| Service        | Port | Purpose                                         |
-| -------------- | ---- | ----------------------------------------------- |
-| `node`         | 9944 | Midnight node, `dev` chain preset               |
-| `indexer`      | 8088 | GraphQL indexer for chain state                 |
-| `proof-server` | 6300 | Generates ZK proofs for contract transactions   |
+Giving an autonomous agent direct access to a wallet creates a fundamental trust problem.
 
-State lives in container-managed volumes. Tear everything down with:
+If an agent has unrestricted wallet access, the user has to trust it not to:
 
-```bash
-docker compose down -v
-```
+- Spend more than intended
+- Send funds to unauthorized recipients
+- Exceed a daily budget
+- Continue spending after its permission expires
 
-That removes all containers, networks, and volumes. The next `npm run setup` starts from a clean slate.
+Traditional wallets primarily answer:
 
-## ⚠️ LOCAL DEVNET ONLY
+"Who controls the wallet?"
 
-The deploy script uses a well-known genesis seed (`0000…0001`) so the
-pre-minted NIGHT in the `dev` chain preset is immediately available. **Do
-not use this seed against Preprod, mainnet, or any environment that
-handles real value** — anyone running this devnet has full access to
-funds at this seed.
+Vouch focuses on a different question:
 
-## Networks
+"What is the agent allowed to do?"
 
-This DApp supports three networks:
+---
 
-| Network | When to use | Default? |
-|---|---|---|
-| `undeployed` | Local devnet bundled in `docker-compose.yml`. Genesis seed is hardcoded; no funding needed. | yes |
-| `preview` | Public preview testnet. Faucet at `https://midnight-tmnight-preview.nethermind.dev`. |  |
-| `preprod` | Public preprod testnet. Faucet at `https://midnight-tmnight-preprod.nethermind.dev`. |  |
+## The Vouch Approach
 
-The active network is **sticky**: whichever network you last interacted
-with stays active until you switch. Any command run with `--network <name>`
-also sets that network active for subsequent commands. The default on a
-fresh project is `undeployed` (local devnet).
+Vouch separates wallet ownership from agent authority.
 
-```sh
-npm run setup -- --network preview   # runs on preview AND makes it active
-npm run cli                          # still uses preview
-npm run check-balance                # still uses preview
-```
+The user remains the owner of the wallet while an autonomous agent receives restricted spending authority.
 
-You can also switch without running anything else:
+For example:
 
-```sh
-npm run network preview         # active network is now preview
-npm run network                 # prints current active network
-npm run network undeployed      # switch back to local devnet
-```
+User
+  |
+  | owns wallet
+  v
+Vouch
+  |
+  | grants limited permissions
+  v
+AI Agent
+  |
+  +-- Daily spending limit
+  +-- Per-transaction limit
+  +-- Allowed categories
+  +-- Authorized recipients
+  +-- Expiration
 
-### How wallets work across networks
+If the agent requests a valid payment, the authorization policy can allow it.
 
-- `undeployed` uses a hardcoded genesis seed. Local devnet pre-funds it.
-- `preview` and `preprod` generate a fresh wallet on first use: a 24-word
-  BIP-39 recovery phrase (printed once) plus its derived seed, both stored
-  in `.midnight-state.json` (gitignored). The wallet survives switching
-  networks — switch back later and your funded wallet returns.
-- **Back up your recovery phrase** if you fund a public-network wallet you
-  care about. It is printed when the wallet is created and kept in
-  `.midnight-state.json` under `wallets.<network>.mnemonic`. Anyone holding
-  the phrase controls the wallet.
-- Wallets created before mnemonic support keep working from their stored
-  `seed`; they just have no phrase to import into Lace.
+If the request violates the policy, it is rejected.
 
-### Using the same wallet as Lace
+The agent never needs the user's wallet private key.
 
-Seeds are derived with the standard BIP-39 `mnemonicToSeed` step — the same
-convention Lace uses — so identity is portable in both directions:
+---
 
-- **Bring your Lace wallet here**: pass your recovery phrase via the
-  `MIDNIGHT_WALLET_MNEMONIC` env var — the derived addresses match Lace.
-  To keep the phrase out of your shell history, enter it with a hidden
-  prompt instead of typing it inline:
+## Why Midnight?
 
-  ```bash
-  read -s MIDNIGHT_WALLET_MNEMONIC && export MIDNIGHT_WALLET_MNEMONIC
-  npm run deploy
-  ```
-- **Take a scaffold wallet to Lace**: restore Lace from the 24-word phrase
-  in `.midnight-state.json`.
+Vouch is designed around Midnight's privacy-preserving architecture.
 
-### Funding a public-network wallet
+Financial information and authorization policies can contain sensitive information. Users should not necessarily have to expose their complete financial state simply to prove that an individual action is permitted.
 
-On the first run with `--network preview` (or `preprod`):
+Vouch therefore uses Midnight for the privacy-critical authorization layer:
 
-1. `setup` will print your wallet address and the faucet URL.
-2. Open the faucet URL, paste the address, request tNIGHT.
-3. `setup` polls the wallet balance every 10 s and continues automatically
-   once funds arrive.
-4. The default poll budget is 10 minutes. Override with
-   `MIDNIGHT_FAUCET_TIMEOUT_MS=1800000` (30 min) for unattended runs.
+- Private policy information
+- Agent authorization
+- Spending authorization
+- Privacy-preserving state
+- Proof-based authorization logic
 
-If the faucet is slow or the script times out, your seed is preserved.
-Re-run `npm run setup -- --network preview` once the funds land.
+The application infrastructure can manage agent configuration and application metadata, while Midnight provides the authorization layer.
 
-### Environment overrides
+### Core Principle
 
-These env vars override the active network's config (no per-network
-suffix — they apply to whichever network is active for the run):
+Off-chain infrastructure manages agents; Midnight enforces their authority.
 
-| Variable | Effect |
-|---|---|
-| `MIDNIGHT_WALLET_SEED` | Use this hex seed (32-128 hex chars; a Lace-compatible BIP-39 seed is 128) instead of generating/persisting one. Useful for CI with a pre-funded wallet. |
-| `MIDNIGHT_WALLET_MNEMONIC` | Use this BIP-39 recovery phrase instead of generating a wallet — e.g. your Lace phrase, for the same addresses as Lace. Not persisted. Set only one of seed/mnemonic. |
-| `MIDNIGHT_INDEXER_URL` | Override the indexer GraphQL URL. |
-| `MIDNIGHT_INDEXER_WS_URL` | Override the indexer WS URL. |
-| `MIDNIGHT_NODE_URL` | Override the node RPC URL. |
-| `MIDNIGHT_FAUCET_URL` | Override the faucet URL printed during setup. |
-| `MIDNIGHT_PROOF_SERVER_URL` | Override the proof server URL — set to a public proof server (e.g. `https://lace-proof-pub.preview.midnight.network`) to skip running one locally. |
-| `MIDNIGHT_FAUCET_TIMEOUT_MS` | Faucet poll budget in milliseconds (default 600000 = 10 min). |
+---
 
-By default all networks use the **local** proof server. Public proof
-servers exist (see the env override above) but the local default keeps
-your witness data on your machine and avoids depending on a remote
-service for the deploy hot path.
+## Agent Model
 
-### Switching back to local devnet
+Vouch is designed so that users do not need to already have their own autonomous AI agent.
 
-```sh
-npm run network undeployed     # or: npm run setup -- --network undeployed
-```
+Users can create an agent from a predefined type and give that agent a custom name.
 
-Your preview/preprod wallet seeds and deploy addresses stay in
-`.midnight-state.json`. Switch back later, and they're still there.
+An agent is an instance of an agent type with its own permissions and authorization policy.
 
-### Wallet sync cache
+The same authorization mechanism can be used across different types of agents.
 
-After each `deploy`, `cli`, or `check-balance` run, the scripts serialize the
-wallet's synced state to `.midnight-wallet-state/<network>/` (gitignored).
-The next run on the same network restores from that snapshot and only catches
-up to the latest block instead of replaying from genesis — meaningful on
-`preview` / `preprod` where a from-seed sync takes minutes.
+---
 
-If the cache is stale or corrupt (e.g. after an SDK upgrade with an
-incompatible state format) the wallet falls back to a fresh from-seed sync
-with a one-line warning. `npm run clean` removes the cache along with other
-generated state.
+## Agent Types
 
-## Available scripts
+### Developer Agent
 
-| Script                  | Description                                                    |
-| ----------------------- | -------------------------------------------------------------- |
-| `npm run setup`         | One-shot: start devnet, compile, deploy.                       |
-| `npm run compile`       | Compile the Compact contract.                                  |
-| `npm run deploy`        | Deploy the compiled contract (requires devnet up + compiled).  |
-| `npm run cli`           | Interactive CLI to call circuits on the deployed contract.     |
-| `npm run check-balance` | Print the genesis-seed wallet's NIGHT and DUST balances.       |
-| `npm run test:e2e`      | Smoke + read-back check against the deployed contract.         |
-| `npm run clean`         | Remove `contracts/managed/`, `.midnight-state.json`, and `.midnight-wallet-state/`. |
-| `npm run proof-server:start` / `:stop` | Compose lifecycle for just the proof-server service. |
+Designed for development-related autonomous tasks.
 
-## Project structure
+### Research Agent
 
-```
+Designed for autonomous research and information-gathering tasks.
+
+### Task Agent
+
+Designed for general task-oriented autonomous workflows.
+
+### Connect Custom Agent
+
+Developers can connect an autonomous agent they have built themselves.
+
+This is intended for developers who already have their own autonomous agent implementation rather than simply connecting a normal chat interface.
+
+All agent types use the same underlying authorization concept.
+
+---
+
+## Spending Policies
+
+A Vouch agent can be restricted by policies such as:
+
+- Daily spending limit
+- Per-transaction spending limit
+- Allowed spending categories
+- Whitelisted recipients
+- Permission expiration
+
+For example:
+
+Agent Policy
+
+Daily limit: $20
+Per-transaction limit: $5
+Category: API services
+Recipients: Approved providers
+Expiration: Configured by user
+
+The important distinction is that these rules are intended to be enforced by the authorization layer rather than simply being UI restrictions.
+
+---
+
+## Example Flow
+
+A simplified Vouch transaction flow looks like this:
+
+1. User connects wallet
+2. User creates an agent
+3. User selects an agent type
+4. User gives the agent a name
+5. User defines a spending policy
+6. Agent receives limited authority
+7. Agent requests a payment
+8. Vouch checks the authorization policy
+9. The request is either allowed or rejected
+
+### Example
+
+Suppose an agent has:
+
+Daily limit: $20
+Per-transaction limit: $5
+
+The agent requests $4.
+
+The request satisfies the configured limits and can be authorized.
+
+Later, the agent requests $8.
+
+The request exceeds the per-transaction limit and is rejected.
+
+The user does not need to manually approve every individual action.
+
+The policy defines the boundaries beforehand.
+
+---
+
+## Privacy Model
+
+Vouch is being designed so that sensitive authorization information does not become ordinary public application data.
+
+The intended model separates application data from privacy-critical authorization state.
+
+### Application Data
+
+Examples include:
+
+- Agent name
+- Agent type
+- Agent status
+- Application metadata
+
+### Privacy-Critical Authorization State
+
+Examples include:
+
+- Spending policy
+- Private spending state
+- Agent authorization secrets
+- Authorization information required to prove that a request satisfies the policy
+
+The current implementation uses Midnight's private DApp/client-side state through witnesses rather than treating policy data as a public ledger field.
+
+---
+
+## Architecture
+
+The current architecture is built around three major layers.
+
+Vouch UI
+|
++-- Agent creation
++-- Agent configuration
++-- Wallet connection
++-- Activity dashboard
+|
+v
+Agent / Application Infrastructure
+|
++-- Agent instances
++-- Agent runtime
++-- Application metadata
++-- Custom agent integration
+|
+v
+Midnight Authorization Layer
+|
++-- Agent authorization
++-- Spending policies
++-- Spend verification
++-- Private state
++-- Proof-based authorization
+
+The application database is not intended to replace Midnight as the source of truth for protected authorization state.
+
+The database can manage application-level information such as agent records, while privacy-critical authorization state remains part of the Midnight authorization layer.
+
+---
+
+## Current Implementation
+
+Vouch is currently being developed as a Level 4 MVP for the Rise In "New Moon to Full: Monthly Moonshots on Midnight" program.
+
+### Implemented
+
+#### Spending Policy
+
+The current Compact contract implements:
+
+- Daily spending limits
+- Per-transaction spending limits
+- Private policy values supplied through a witness
+- Spending-state advancement for successful requests
+- Rejection of requests that violate configured limits
+
+#### Agent Authorization
+
+The current implementation also includes:
+
+- Owner authorization
+- Authorized agent commitment
+- Private owner and agent secrets
+- Agent authorization checks before spending
+- Rejection of unauthorized agents
+
+The current implementation has been locally compiled and simulated successfully.
+
+---
+
+## In Progress
+
+The following parts are still being developed:
+
+- Lace wallet connection
+- Agent creation interface
+- Agent naming
+- Agent type selection
+- Policy configuration UI
+- Agent runtime
+- Spend request interface
+- Dashboard
+- Transaction/activity display
+- Rejected transaction explanations
+- Preprod deployment
+- Automated tests
+- CI/CD
+
+---
+
+## Tech Stack
+
+Vouch currently uses:
+
+- Midnight Network
+- Compact
+- Midnight.js
+- TypeScript
+- Node.js
+- pnpm
+- Docker
+- WSL
+- GitHub
+
+The project uses Midnight's local development environment for contract compilation, proof generation, and local testing during development.
+
+---
+
+## Getting Started
+
+### Requirements
+
+Make sure you have:
+
+- Node.js 22+
+- pnpm
+- Docker
+- Docker Compose
+- WSL/Linux environment
+
+Vouch currently uses Node.js 22.14.0.
+
+### Clone the Repository
+
+git clone https://github.com/Nistha-verse/Vouch.git
+cd Vouch
+
+### Use the Project Node Version
+
+nvm use
+
+If necessary:
+
+nvm install
+nvm use
+
+### Install Dependencies
+
+pnpm install
+
+### Compile the Compact Contract
+
+pnpm run compile
+
+### Start the Local Environment
+
+pnpm run setup
+
+This initializes the local Midnight development environment and prepares the application for local interaction.
+
+### Run the CLI
+
+pnpm run cli
+
+---
+
+## Project Structure
+
 vouch/
-├── contracts/
-│   └── hello-world.compact     # Compact source
-├── scripts/
-│   └── e2e-check.ts            # smoke + read-back
-├── src/
-│   ├── network.ts              # network selection + state file management
-│   ├── wallet.ts               # wallet construction + sync-state cache
-│   ├── setup.ts                # orchestrator for `npm run setup`
-│   ├── deploy.ts               # deploy the contract
-│   ├── cli.ts                  # interact with deployed contract
-│   └── check-balance.ts        # NIGHT / DUST balance
-├── docker-compose.yml          # node + indexer + proof-server
-├── .midnight-state.json        # written by deploy (gitignored)
-├── .midnight-wallet-state/     # serialized sync state per network (gitignored)
-├── package.json
-└── tsconfig.json
-```
+|
++-- contracts/
+|   +-- vouch-policy.compact
+|   +-- managed/
+|
++-- src/
+|   +-- vouch-policy.ts
+|   +-- vouch-policy-witnesses.ts
+|
++-- scripts/
+|
++-- package.json
++-- pnpm-lock.yaml
++-- tsconfig.json
++-- README.md
 
-## Compact compiler version
+---
 
-`.compact-version` at the create-mn-app repo root pinned the compiler
-version this project was scaffolded against. To upgrade your local
-compiler to that version:
+## Development Roadmap
 
-```bash
-compact update <version>
-compact use <version>
-```
+Vouch is being developed incrementally.
+
+### Phase 1 — Core Authorization
+
+- [x] Initialize Midnight project
+- [x] Implement spending policy
+- [x] Implement agent authorization
+- [x] Compile and locally simulate authorization logic
+
+### Phase 2 — User Experience
+
+- [ ] Connect Lace wallet
+- [ ] Create agent
+- [ ] Choose agent type
+- [ ] Name agent
+- [ ] Configure spending policy
+- [ ] Activate agent
+
+### Phase 3 — Autonomous Agent
+
+- [ ] Developer Agent runtime
+- [ ] Spend request interface
+- [ ] Policy verification flow
+- [ ] Allow/reject results
+- [ ] Custom Agent interface
+
+### Phase 4 — Dashboard
+
+- [ ] Agent dashboard
+- [ ] Private activity view
+- [ ] Transaction/request history
+- [ ] Rejected request explanations
+
+### Phase 5 — Level 4 Delivery
+
+- [ ] Preprod deployment
+- [ ] Automated tests
+- [ ] CI/CD pipeline
+- [ ] Complete documentation
+- [ ] Public demo
+- [ ] Demo video
+- [ ] Product X profile
+
+---
+
+## Future Direction
+
+The initial MVP focuses on demonstrating the authorization primitive.
+
+Future versions can explore:
+
+- Multiple simultaneous agents
+- More granular spending categories
+- Recipient allowlists
+- Time-based permissions
+- Agent-specific budgets
+- Selective transaction disclosure
+- Auditor and tax-tool integrations
+- More advanced autonomous agents
+- Custom agent integrations
+
+The long-term goal is to make autonomous agents capable of interacting with financial systems while keeping user control and privacy at the center.
+
+---
+
+## Built for Midnight
+
+Vouch is being developed as part of the Rise In "New Moon to Full: Monthly Moonshots on Midnight" program.
+
+The project is currently targeting the Level 4 MVP stage and is being developed publicly.
+
+---
+
+## Level 4 Goals
+
+The Level 4 MVP is being developed toward the following goals:
+
+- Working MVP on Midnight Preprod
+- Public GitHub repository
+- Documentation
+- CI/CD pipeline
+- Public product profile
+- Demo video
+- Continued public development
+
+---
+
+## License
+
+License information will be added as the project progresses.
