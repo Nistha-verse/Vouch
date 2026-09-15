@@ -1,0 +1,38 @@
+pragma language_version >= 0.23;
+
+import CompactStandardLibrary;
+
+export ledger ownerCommitment: Bytes<32>;
+export ledger authorizedAgentCommitment: Bytes<32>;
+
+constructor() {
+    ownerCommitment = disclose(persistentHash<Bytes<32>>(getOwnerSecret()));
+}
+
+// The owner secret and agent secret are private witness values.
+witness getOwnerSecret(): Bytes<32>;
+witness getAgentSecret(): Bytes<32>;
+
+// Private policy values are supplied by the DApp witness at proof time.
+witness getPolicy(amount: Uint<64>): [Uint<64>, Uint<64>, Uint<64>];
+
+export circuit authorizeAgent(agentCommitment: Bytes<32>): [] {
+    assert(
+        ownerCommitment == persistentHash<Bytes<32>>(getOwnerSecret()),
+        "Only the owner can authorize an agent"
+    );
+    assert(agentCommitment != ownerCommitment, "Owner cannot authorize itself as agent");
+    authorizedAgentCommitment = disclose(agentCommitment);
+}
+
+// Authorize a spend and advance the client-side spent-today value.
+export circuit requestSpend(amount: Uint<64>): [] {
+    assert(
+        authorizedAgentCommitment == persistentHash<Bytes<32>>(getAgentSecret()),
+        "Agent is not authorized"
+    );
+    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
+
+    assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
+    assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
+}
