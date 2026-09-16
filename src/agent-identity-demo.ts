@@ -6,14 +6,12 @@ const developer = createAgentIdentity({
   name: 'Developer Agent',
   type: 'developer',
   status: 'active',
-  authorizedAgentCommitment: '0x1111111111111111111111111111111111111111111111111111111111111111',
 });
 
 const custom = createAgentIdentity({
   name: 'Custom Agent',
   type: 'custom',
   status: 'inactive',
-  authorizedAgentCommitment: '0x2222222222222222222222222222222222222222222222222222222222222222',
 });
 
 assert.equal(developer.name, 'Developer Agent');
@@ -36,8 +34,10 @@ assert.deepEqual(developerKeys, [
   'type',
   'status',
   'createdAt',
-  'authorizedAgentCommitment',
+  'authorization',
 ]);
+assert.equal(developer.authorization.status, 'unauthorized');
+assert.equal('commitment' in developer.authorization, false);
 
 for (const value of [developer, custom]) {
   assert.ok(!('ownerSecret' in value));

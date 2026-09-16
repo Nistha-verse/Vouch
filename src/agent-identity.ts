@@ -4,20 +4,30 @@ export type AgentType = (typeof AGENT_TYPES)[number];
 export const AGENT_STATUSES = ['active', 'inactive', 'revoked'] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
+export type AgentAuthorization =
+  | {
+      readonly status: 'unauthorized';
+    }
+  | {
+      readonly status: 'authorized';
+      readonly commitment: string;
+    };
+
 export interface AgentIdentity {
   readonly agentId: string;
   readonly name: string;
   readonly type: AgentType;
   readonly status: AgentStatus;
   readonly createdAt: string;
-  readonly authorizedAgentCommitment: string;
+  // Authorization is tracked explicitly so we never encode an unauthorized
+  // agent as an empty cryptographic commitment.
+  readonly authorization: AgentAuthorization;
 }
 
 export interface CreateAgentIdentityInput {
   readonly name: string;
   readonly type?: AgentType;
   readonly status?: AgentStatus;
-  readonly authorizedAgentCommitment: string;
 }
 
 function stableHash(value: string): number {
@@ -42,13 +52,13 @@ export function createAgentIdentity(input: CreateAgentIdentityInput): AgentIdent
     throw new Error(`Unsupported agent type: ${String(type)}`);
   }
 
-  const status = input.status ?? 'active';
+  const status = input.status ?? 'inactive';
   if (!AGENT_STATUSES.includes(status)) {
     throw new Error(`Unsupported agent status: ${String(status)}`);
   }
 
   const createdAt = new Date().toISOString();
-  const agentIdSeed = `${name}|${createdAt}|${input.authorizedAgentCommitment}`;
+  const agentIdSeed = `${name}|${createdAt}|${type}|${status}`;
   const uniqueHash = stableHash(agentIdSeed);
 
   return {
@@ -57,6 +67,16 @@ export function createAgentIdentity(input: CreateAgentIdentityInput): AgentIdent
     type,
     status,
     createdAt,
-    authorizedAgentCommitment: input.authorizedAgentCommitment,
+    authorization: { status: 'unauthorized' },
   };
+}
+
+export function isAuthorizedAgent(
+  agent: AgentIdentity,
+): agent is AgentIdentity & { authorization: Extract<AgentAuthorization, { status: 'authorized' }> } {
+  return agent.authorization.status === 'authorized';
+}
+
+export function getAgentCommitment(agent: AgentIdentity): string | undefined {
+  return isAuthorizedAgent(agent) ? agent.authorization.commitment : undefined;
 }
