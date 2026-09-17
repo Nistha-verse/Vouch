@@ -54,7 +54,7 @@ export type AgentRuntimeStatus = 'ready' | 'processing' | 'stopped';
 
 export interface AgentRuntimeMetadata {
   readonly kind: AgentRuntimeKind;
-  readonly provider: 'deterministic-development' | 'external-adapter';
+  readonly provider: 'deterministic-development' | 'external-adapter' | 'groq';
   readonly status: AgentRuntimeStatus;
 }
 

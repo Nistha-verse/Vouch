@@ -282,6 +282,18 @@ The current implementation also includes:
 
 The current implementation has been locally compiled and simulated successfully.
 
+#### Agent Runtime and Groq Proposal Layer
+
+The built-in runtime has a provider-neutral `AgentRuntime` interface and a
+server-side Groq implementation. `GROQ_API_KEY` is read only from the server
+environment, and `GROQ_MODEL` optionally selects the model for the Groq
+implementation. Neither value belongs in an agent identity or an intent.
+
+Groq returns an untrusted proposed action. Vouch validates the structured
+response and creates an `AgentIntent` with the trusted runtime `agentId`.
+That intent remains a proposal and must still pass through Vouch's
+authorization layer before any financial action can be considered.
+
 ---
 
 ## In Progress
@@ -413,7 +425,7 @@ Vouch is being developed incrementally.
 
 ### Phase 3 — Autonomous Agent
 
-- [ ] Developer Agent runtime
+- [x] Built-in agent runtime with deterministic and Groq-backed proposal implementations
 - [ ] Spend request interface
 - [ ] Policy verification flow
 - [ ] Allow/reject results
