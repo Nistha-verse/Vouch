@@ -384,9 +384,28 @@ pnpm run setup
 
 This initializes the local Midnight development environment and prepares the application for local interaction.
 
-### Run the CLI
+Set the Vouch private-state configuration before deployment or execution. These
+values must be supplied through the environment and are never printed by the
+Vouch scripts:
 
-pnpm run cli
+```bash
+export PRIVATE_STATE_PASSWORD='use-at-least-16-characters'
+export VOUCH_OWNER_SECRET='64-hex-characters'
+export VOUCH_AGENT_SECRET='64-hex-characters'
+export VOUCH_ALLOWED_RECIPIENT_COMMITMENT='64-hex-characters'
+export VOUCH_ALLOWED_CATEGORY_COMMITMENT='64-hex-characters'
+```
+
+`pnpm run setup` deploys the Vouch Compact contract. After deployment,
+`pnpm run execution:demo` invokes the generated Vouch circuits through the real
+Midnight.js wallet, proof server, node, and indexer providers. It reports
+success only after Midnight finalizes the authorization transaction. This is
+authorization only, not payment settlement. The current private `spentToday`
+state remains client-private and is not globally concurrency-safe.
+
+### Run the real authorization execution demo
+
+pnpm run execution:demo
 
 ---
 

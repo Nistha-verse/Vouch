@@ -10,6 +10,7 @@
     "build": "npx tsc --noEmit || true",
     "setup": "npx tsx src/setup.ts",
     "deploy": "npx tsx src/deploy.ts",
+    "execution:demo": "npx tsx src/execution/demo.ts",
     "cli": "npx tsx src/cli.ts",
     "check-balance": "npx tsx src/check-balance.ts",
     "network": "npx tsx src/network.ts",
@@ -53,7 +54,8 @@
   ],
   "pnpm": {
     "overrides": {
-      "@midnight-ntwrk/ledger-v8": "8.1.0"
+      "@midnight-ntwrk/ledger-v8": "8.1.0",
+      "@midnight-ntwrk/onchain-runtime-v3": "3.0.0"
     }
   }
 }

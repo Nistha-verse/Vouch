@@ -4,28 +4,19 @@
  * Non-interactive: scaffold → npm run setup runs straight through.
  * No readline prompts, no .midnight-seed file.
  */
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, recordDeployment } from './network';
-import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createWallet, persistWalletState, unshieldedToken } from './wallet';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
+import { loadVouchPrivateState } from './execution/config.js';
+import { createVouchProviders, VOUCH_PRIVATE_STATE_ID } from './execution/midnight.js';
+import { compiledVouchPolicy } from './vouch-policy.js';
 
 // Midnight SDK imports
 import { deployContract } from '@midnight-ntwrk/midnight-js-contracts';
-import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
-import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
-import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-js';
 
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
-
-// Identifier under which this contract's private state is stored. The
-// hello-world contract has no witnesses, so its private state is empty ({}).
-const PRIVATE_STATE_ID = 'helloWorldPrivateState';
 
 // Upper bound on the DUST wait. A healthy local devnet produces DUST within
 // seconds of registration; anything approaching this means the node, the
@@ -72,67 +63,6 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
     }
   }
   return false;
-}
-
-// ─── Compiled contract loading ─────────────────────────────────────────────────
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
-const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
-
-if (!fs.existsSync(contractPath)) {
-  console.error('\n❌ Contract not compiled! Run: npm run compile\n');
-  process.exit(1);
-}
-
-const HelloWorld = await import(pathToFileURL(contractPath).href);
-
-const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-  CompiledContract.withVacantWitnesses,
-  CompiledContract.withCompiledFileAssets(zkConfigPath),
-);
-
-// ─── Providers ─────────────────────────────────────────────────────────────────
-
-async function createProviders(walletCtx: WalletContext) {
-  // The SDK requires the private-state password to be at least 16 characters.
-  // The default below is a placeholder for local devnet only — set a strong
-  // password via PRIVATE_STATE_PASSWORD when you move to a non-local target.
-  const privateStatePassword = process.env.PRIVATE_STATE_PASSWORD?.trim() || 'Local-Devnet-Development-Placeholder-1';
-
-  const walletProvider = {
-    // In Midnight.js 4.1.x the WalletProvider interface returns the key objects
-    // (CoinPublicKey / EncPublicKey) directly — no longer hex strings.
-    getCoinPublicKey: () => walletCtx.shieldedSecretKeys.coinPublicKey,
-    getEncryptionPublicKey: () => walletCtx.shieldedSecretKeys.encryptionPublicKey,
-    async balanceTx(tx: any, ttl?: Date) {
-      // balanceUnboundTransaction -> finalizeRecipe is the complete balancing
-      // path in wallet-sdk 1.x; the earlier explicit signRecipe step is gone.
-      const recipe = await walletCtx.wallet.balanceUnboundTransaction(
-        tx,
-        { shieldedSecretKeys: walletCtx.shieldedSecretKeys, dustSecretKey: walletCtx.dustSecretKey },
-        { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
-      );
-      return walletCtx.wallet.finalizeRecipe(recipe);
-    },
-    submitTx: (tx: any) => walletCtx.wallet.submitTransaction(tx) as any,
-  };
-
-  const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
-  const accountId = walletCtx.unshieldedKeystore.getBech32Address().toString();
-
-  return {
-    privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
-      accountId,
-      privateStoragePasswordProvider: () => privateStatePassword,
-    }),
-    publicDataProvider: indexerPublicDataProvider(networkConfig.indexer, networkConfig.indexerWS),
-    zkConfigProvider,
-    proofProvider: httpClientProofProvider(networkConfig.proofServer, zkConfigProvider),
-    walletProvider,
-    midnightProvider: walletProvider,
-  };
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
@@ -289,7 +219,8 @@ async function main() {
   process.stdout.write('\r  Proof server ready!                                 \n');
 
   console.log('  Setting up providers...');
-  const providers = await createProviders(walletCtx);
+  const providers = createVouchProviders(walletCtx, network, networkConfig);
+  const privateState = loadVouchPrivateState();
 
   // The wallet's reported DUST balance is a *time-projection* of what its
   // registered NIGHT will eventually generate; the tx-builder spends only
@@ -313,18 +244,15 @@ async function main() {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      // Midnight.js 4.1.x supplies private state via privateStateId +
-      // initialPrivateState (empty here — the hello-world contract has no
-      // witnesses). args is the contract constructor's arguments: empty for
-      // hello-world's no-arg constructor. (Statically-typed contracts can omit
-      // args entirely; this script loads the contract dynamically, so the
-      // conditional args type widens to any[] and an explicit [] is required.)
-      deployed = await deployContract(providers, {
-        compiledContract: compiledContract as any,
-        args: [],
-        privateStateId: PRIVATE_STATE_ID,
-        initialPrivateState: {},
-      });
+      // The installed NodeZkConfigProvider exposes verifier IDs as `string`,
+      // while the generated contract narrows them to circuit names. This is a
+      // provider typing mismatch in Midnight.js 4.1.x; runtime APIs remain the
+      // generated contract/proof-server APIs.
+      deployed = await deployContract(providers as any, {
+        compiledContract: compiledVouchPolicy,
+        privateStateId: VOUCH_PRIVATE_STATE_ID,
+        initialPrivateState: privateState,
+      } as any);
       break;
     } catch (err: any) {
       const errMsg = err?.message || err?.toString() || '';
