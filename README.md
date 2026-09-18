@@ -171,6 +171,14 @@ A simplified Vouch transaction flow looks like this:
 8. Vouch checks the authorization policy
 9. The request is either allowed or rejected
 
+The Compact contract is the authorization primitive for the request. It
+verifies the agent secret against the stored commitment and checks the amount
+against private policy witnesses, including the configured recipient and
+category commitments. The current contract does not transfer funds, and its
+private `spentToday` transition is local private state rather than a
+globally-concurrent accounting ledger. A successful authorization circuit
+must therefore not be described as a payment.
+
 ### Example
 
 Suppose an agent has:

@@ -14,7 +14,14 @@ witness getOwnerSecret(): Bytes<32>;
 witness getAgentSecret(): Bytes<32>;
 
 // Private policy values are supplied by the DApp witness at proof time.
-witness getPolicy(amount: Uint<64>): [Uint<64>, Uint<64>, Uint<64>];
+// Recipient/category commitments are a singleton allowlist in this milestone.
+witness getPolicy(amount: Uint<64>): [
+    Uint<64>,
+    Uint<64>,
+    Uint<64>,
+    Bytes<32>,
+    Bytes<32>
+];
 
 export circuit authorizeAgent(agentCommitment: Bytes<32>): [] {
     assert(
@@ -25,14 +32,33 @@ export circuit authorizeAgent(agentCommitment: Bytes<32>): [] {
     authorizedAgentCommitment = disclose(agentCommitment);
 }
 
-// Authorize a spend and advance the client-side spent-today value.
-export circuit requestSpend(amount: Uint<64>): [] {
+// Authorize a spend request. This circuit does not transfer funds.
+export circuit requestSpend(
+    amount: Uint<64>,
+    recipientCommitment: Bytes<32>,
+    categoryCommitment: Bytes<32>
+): [] {
     assert(
         authorizedAgentCommitment == persistentHash<Bytes<32>>(getAgentSecret()),
         "Agent is not authorized"
     );
-    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
+    assert(amount > 0, "Amount must be greater than zero");
+    const [
+        dailyLimit,
+        perTransactionLimit,
+        spentToday,
+        allowedRecipientCommitment,
+        allowedCategoryCommitment
+    ] = getPolicy(amount);
 
     assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
     assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
+    assert(
+        recipientCommitment == allowedRecipientCommitment,
+        "Recipient is not allowed"
+    );
+    assert(
+        categoryCommitment == allowedCategoryCommitment,
+        "Category is not allowed"
+    );
 }
