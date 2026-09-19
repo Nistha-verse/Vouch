@@ -198,6 +198,73 @@ The user does not need to manually approve every individual action.
 
 The policy defines the boundaries beforehand.
 
+
+## REST API (local development)
+
+This repository includes a Fastify-based HTTP server providing a boundary around the existing Vouch domain services. It is intended for local development and integrates with the project's existing AuthorizationService, AgentManager, runtimes, and VouchExecutionService.
+
+Start the server:
+
+- Install dependencies: corepack pnpm install
+- Start: pnpm run server OR npm run server (the project includes a script alias when developing)
+- Default address: http://127.0.0.1:3000
+
+Endpoints
+
+- GET /health
+  - Returns: { "status": "ok", "service": "vouch-api" }
+
+- GET /ready
+  - Returns whether the application server is initialized. This is distinct from network/Midnight readiness.
+
+Agents
+
+- POST /api/agents
+  - Create an agent
+  - Body: { "name": "Srishti", "type": "developer" }
+  - Returns 201 and the created agent object
+
+- GET /api/agents
+  - List agents
+
+- GET /api/agents/:agentId
+  - Get a specific agent
+
+- POST /api/agents/:agentId/activate
+  - Activate agent (uses AgentManager.activateAgent)
+
+- POST /api/agents/:agentId/deactivate
+  - Deactivate agent
+
+- POST /api/agents/:agentId/revoke
+  - Revoke agent
+
+- POST /api/agents/:agentId/rename
+  - Body: { "name": "New Name" }
+
+Authorization
+
+- POST /api/authorization/check
+  - Application pre-validation using AuthorizationService.authorize
+  - Spend amounts must be decimal integer strings (no decimals, exponents, or whitespace). Positive non-zero only.
+  - Response distinguishes "allowed" (application pre-validation) from final Midnight authorization.
+
+- POST /api/authorization/execute
+  - Executes an allowed spend via VouchExecutionService -> Midnight
+  - Requires recipientCommitment and categoryCommitment (64 hex chars each representing 32 bytes)
+  - This endpoint performs pre-validation and then delegates to VouchExecutionService; it will return the confirmed execution result from that service when successful.
+
+Runtime
+
+- POST /api/agents/:agentId/propose
+  - Runs the Groq-backed built-in runtime for the agent and returns a proposal (AgentIntent). This is a proposal only; it is not an authorization or transaction.
+
+Notes
+
+- Proposals (agent runtime outputs), pre-validation checks (AuthorizationService.authorize), and Midnight execution are distinct phases. A runtime proposal does not imply authorization; an "allowed" pre-validation is application-level UX feedback only and is not a transaction. Midnight remains authoritative for cryptographic authorization and final acceptance.
+
+
+
 ---
 
 ## Privacy Model
