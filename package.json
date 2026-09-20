@@ -7,7 +7,10 @@
   "license": "MIT",
   "scripts": {
     "compile": "compact compile contracts/vouch-policy.compact contracts/managed/vouch-policy",
-    "build": "npx tsc --noEmit || true",
+    "build": "tsc --noEmit && tsc -p frontend/tsconfig.json --noEmit && vite build",
+    "typecheck": "tsc --noEmit && tsc -p frontend/tsconfig.json --noEmit",
+    "frontend:dev": "vite",
+    "frontend:build": "vite build",
     "setup": "npx tsx src/setup.ts",
     "deploy": "npx tsx src/deploy.ts",
     "execution:demo": "npx tsx src/execution/demo.ts",
@@ -43,8 +46,14 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "@types/react": "^19.1.14",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
     "tsx": "^4.23.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vite": "^7.1.7"
   },
   "engines": {
     "node": ">=22.0.0"

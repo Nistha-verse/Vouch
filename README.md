@@ -73,6 +73,27 @@ If the request violates the policy, it is rejected.
 
 The agent never needs the user's wallet private key.
 
+## Frontend
+
+The production frontend is a Vite + React application in [`frontend/`](./frontend/).
+It uses the existing Fastify routes and the browser Midnight DApp Connector
+implementation in [`src/wallet/index.ts`](./src/wallet/index.ts); it does not
+hold wallet secrets or call Groq directly.
+
+Run the API and frontend in separate terminals:
+
+```bash
+pnpm server
+pnpm frontend:dev
+```
+
+The Vite development server proxies `/api/` to `http://127.0.0.1:3000`.
+`pnpm build` type-checks the backend and frontend and creates the production
+bundle in `dist/frontend`. Agent state is currently in-memory, and the UI
+shows empty states rather than inventing activity or balances. Application
+authorization checks are presented as pre-validation; Midnight remains
+authoritative for cryptographic authorization and final transaction outcomes.
+
 ---
 
 ## Why Midnight?
