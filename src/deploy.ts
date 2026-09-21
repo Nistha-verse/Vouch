@@ -81,6 +81,30 @@ async function main() {
   if (restoredCount > 0) {
     console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
   }
+    let stopping = false;
+  const handleShutdown = async (signal: string) => {
+    if (stopping) return;
+    stopping = true;
+
+    console.log(`\n  ${signal} received — saving wallet sync state...`);
+    try {
+      await persistWalletState(network, walletCtx);
+      console.log('  ✓ Wallet state checkpoint saved.');
+    } catch (err) {
+      console.error('  ⚠ Could not save wallet state:', err);
+    }
+
+    try {
+      await walletCtx.wallet.stop();
+    } catch {
+      // Wallet may already be stopped.
+    }
+
+    process.exit(130);
+  };
+
+  process.once('SIGINT', () => void handleShutdown('SIGINT'));
+  process.once('SIGTERM', () => void handleShutdown('SIGTERM'));
 
   console.log('  Syncing with network...');
   console.log('  ℹ  This may take several minutes depending on network size.');
