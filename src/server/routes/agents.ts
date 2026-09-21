@@ -1,66 +1,69 @@
 import type { FastifyInstance } from 'fastify';
 import type { AgentManager } from '../../agent-manager.js';
+import type { AgentRepository } from '../../persistence/database.js';
+import { scopedManager, userId } from '../request-context.js';
 
-function isValidAgentType(v: unknown): v is string {
+function isValidAgentType(v: unknown): v is 'developer' | 'research' | 'task' | 'custom' {
   return v === 'developer' || v === 'research' || v === 'task' || v === 'custom';
 }
 
-export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager) {
-  fastify.post('/api/agents', async (request, reply) => {
-    const body = request.body as any;
-    const name = typeof body?.name === 'string' ? body.name.trim() : '';
-    const type = body?.type;
-    if (!name) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Agent name is required.' } });
-    if (type !== undefined && !isValidAgentType(type)) {
-      return reply.status(400).send({ error: { code: 'invalid-type', message: 'Unsupported agent type.' } });
-    }
+function statusFor(code: string): number {
+  return code === 'agent-not-found' ? 404 : code.startsWith('already-') ? 409 : 400;
+}
 
-    const result = manager.create({ name: name, type });
-    if (!result.ok) {
-      const code = (result.error.code as string) ?? 'agent-create-failed';
-      return reply.status(400).send({ error: { code, message: result.error.message, details: result.error.details } });
+export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository) {
+  fastify.post('/api/agents', async (request, reply) => {
+    const scoped = scopedManager(manager, request, reply);
+    const owner = userId(request, reply);
+    if (!scoped || !owner) return;
+    const body = request.body as { name?: unknown; type?: unknown } | undefined;
+    if (typeof body?.name !== 'string' || !body.name.trim()) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Agent name is required.' } });
+    if (body.type !== undefined && !isValidAgentType(body.type)) return reply.status(400).send({ error: { code: 'invalid-type', message: 'Unsupported agent type.' } });
+    try {
+      const result = scoped.create({ name: body.name, type: body.type });
+      if (!result.ok) return reply.status(statusFor(result.error.code)).send({ error: { code: result.error.code, message: 'Unable to create agent.' } });
+      repository.addActivity({ userId: owner, agentId: result.value.agentId, event: 'agent-created' });
+      return reply.status(201).send(result.value);
+    } catch (error) {
+      request.log.error(error);
+      return reply.status(500).send({ error: { code: 'internal-error', message: 'Unable to create agent.' } });
     }
-    return reply.status(201).send(result.value);
   });
 
-  fastify.get('/api/agents', async () => manager.listAgents());
+  fastify.get('/api/agents', async (request, reply) => {
+    const scoped = scopedManager(manager, request, reply);
+    return scoped ? scoped.listAgents() : undefined;
+  });
 
   fastify.get('/api/agents/:agentId', async (request, reply) => {
+    const scoped = scopedManager(manager, request, reply);
+    if (!scoped) return;
     const { agentId } = request.params as { agentId: string };
-    const agent = manager.getAgent(agentId);
-    if (!agent) return reply.status(404).send({ error: { code: 'agent-not-found', message: `Agent ${agentId} was not found.` } });
-    return agent;
+    const agent = scoped.getAgent(agentId);
+    return agent ? agent : reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
   });
 
-  fastify.post('/api/agents/:agentId/activate', async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
-    const r = manager.activateAgent(agentId);
-    if (!r.ok) return reply.status(400).send({ error: { code: r.error.code, message: r.error.message } });
-    return r.value;
-  });
-
-  fastify.post('/api/agents/:agentId/deactivate', async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
-    const r = manager.deactivateAgent(agentId);
-    if (!r.ok) return reply.status(400).send({ error: { code: r.error.code, message: r.error.message } });
-    return r.value;
-  });
-
-  fastify.post('/api/agents/:agentId/revoke', async (request, reply) => {
-    const { agentId } = request.params as { agentId: string };
-    const r = manager.revokeAgent(agentId);
-    if (!r.ok) return reply.status(400).send({ error: { code: r.error.code, message: r.error.message } });
-    return r.value;
-  });
+  for (const action of ['activate', 'deactivate', 'revoke'] as const) {
+    fastify.post(`/api/agents/:agentId/${action}`, async (request, reply) => {
+      const scoped = scopedManager(manager, request, reply);
+      const owner = userId(request, reply);
+      if (!scoped || !owner) return;
+      const { agentId } = request.params as { agentId: string };
+      const result = action === 'activate' ? scoped.activateAgent(agentId) : action === 'deactivate' ? scoped.deactivateAgent(agentId) : scoped.revokeAgent(agentId);
+      if (!result.ok) return reply.status(statusFor(result.error.code)).send({ error: { code: result.error.code, message: 'Agent state transition was not applied.' } });
+      repository.addActivity({ userId: owner, agentId, event: action === 'revoke' ? 'agent-revoked' : `agent-${action}d` });
+      return result.value;
+    });
+  }
 
   fastify.post('/api/agents/:agentId/rename', async (request, reply) => {
+    const scoped = scopedManager(manager, request, reply);
+    if (!scoped) return;
     const { agentId } = request.params as { agentId: string };
-    const body = request.body as { name?: unknown };
-    const newName = typeof body?.name === 'string' ? body.name.trim() : '';
-    if (!newName) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Name is required' } });
-
-    const r = manager.renameAgent(agentId, newName);
-    if (!r.ok) return reply.status(400).send({ error: { code: r.error.code, message: r.error.message } });
-    return r.value;
+    const body = request.body as { name?: unknown } | undefined;
+    if (typeof body?.name !== 'string' || !body.name.trim()) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Name is required.' } });
+    const result = scoped.renameAgent(agentId, body.name);
+    if (!result.ok) return reply.status(statusFor(result.error.code)).send({ error: { code: result.error.code, message: 'Agent rename was not applied.' } });
+    return result.value;
   });
 }

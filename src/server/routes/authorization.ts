@@ -1,92 +1,133 @@
 import type { FastifyInstance } from 'fastify';
-import type { AuthorizationService } from '../../authorization/service.js';
+import type { AgentManager } from '../../agent-manager.js';
+import { AuthorizationService } from '../../authorization/service.js';
+import type { AuthorizationPolicy } from '../../authorization/types.js';
 import type { VouchExecutionService } from '../../execution/service.js';
+import type { AgentRepository } from '../../persistence/database.js';
+import { scopedManager, userId } from '../request-context.js';
+import { canonicalCategory, canonicalRecipient } from '../../authorization/canonical.js';
 
-function parseAmountStrict(s: unknown): bigint {
-  if (typeof s !== 'string') throw new Error('Amount must be a decimal string');
-  if (s.trim() !== s) throw new Error('Amount must not have surrounding whitespace');
-  if (!/^[0-9]+$/.test(s)) throw new Error('Amount must be a whole decimal integer string');
-  if (s === '0') throw new Error('Amount must be greater than zero');
-  if (s.startsWith('0') && s !== '0') {
-    // allow "0" only which is rejected above; leading zeros are allowed? Reject to be strict
-    // but some callers may use leading zeros; choose to reject to avoid ambiguity
-    throw new Error('Amount must not have leading zeros');
-  }
-  try {
-    const v = BigInt(s);
-    if (v <= 0n) throw new Error('Amount must be positive');
-    return v;
-  } catch (e) {
-    throw new Error('Invalid amount');
-  }
+const decimal = /^[1-9][0-9]*$/;
+const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+
+function amount(value: unknown): bigint {
+  if (typeof value !== 'string' || !decimal.test(value) || value.length > 78) throw new Error('Amount must be a positive decimal integer string.');
+  return BigInt(value);
 }
 
-function validateHex32(s: unknown): Uint8Array {
-  if (typeof s !== 'string') throw new Error('Commitment must be a 64-char hex string');
-  if (!/^[0-9a-fA-F]{64}$/.test(s)) throw new Error('Commitment must be 32 bytes (64 hex chars)');
-  return Uint8Array.from(Buffer.from(s, 'hex'));
+function policyInput(value: unknown): AuthorizationPolicy {
+  if (!value || typeof value !== 'object') throw new Error('Policy is required.');
+  const input = value as Record<string, unknown>;
+  if (input.dailyLimit === undefined || input.perTransactionLimit === undefined) throw new Error('Policy limits are required.');
+  const dailyLimit = amount(input.dailyLimit);
+  const perTransactionLimit = amount(input.perTransactionLimit);
+  if (perTransactionLimit > dailyLimit) throw new Error('Per-transaction limit cannot exceed daily limit.');
+  const list = (field: string, max: number): string[] | undefined => {
+    if (input[field] === undefined) return undefined;
+    if (!Array.isArray(input[field]) || input[field].length > 100 || !input[field].every((item) => text(item, max))) throw new Error(`Invalid ${field}.`);
+    return (input[field] as string[]).map((item) => item.trim());
+  };
+  return { dailyLimit, perTransactionLimit, allowedCategories: list('allowedCategories', 64), allowedRecipients: list('allowedRecipients', 256) };
 }
 
-export function registerAuthorizationRoutes(fastify: FastifyInstance, authorization: AuthorizationService, execution?: VouchExecutionService) {
-  fastify.post('/api/authorization/check', async (request, reply) => {
-    const body = request.body as any;
+function intent(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== 'object') throw new Error('Malformed proposal.');
+  const value = body as Record<string, unknown>;
+  if (value.kind !== 'proposal' || typeof value.agentId !== 'string' || (value.action !== 'spend' && value.action !== 'observe')) throw new Error('Malformed proposal.');
+  return {
+    ...value,
+    ...(value.action === 'spend'
+      ? {
+        amount: amount(value.amount),
+        recipient: canonicalRecipient(value.recipient),
+        category: canonicalCategory(value.category),
+      }
+      : {}),
+  };
+}
+
+export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, execution?: VouchExecutionService) {
+  const getAuthorization = (owner: string, agentId: string) => {
+    const scoped = manager.forUser(owner);
+    const state = repository.getPolicy(owner, agentId);
+    return new AuthorizationService(scoped, state ? new Map([[agentId, state]]) : new Map());
+  };
+
+  fastify.get('/api/agents/:agentId/policy', async (request, reply) => {
+    const owner = userId(request, reply);
+    if (!owner) return;
+    const { agentId } = request.params as { agentId: string };
+    if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
+    const state = repository.getPolicy(owner, agentId);
+    return state ? { ...state.policy, dailyLimit: state.policy.dailyLimit.toString(), perTransactionLimit: state.policy.perTransactionLimit.toString() } : reply.status(404).send({ error: { code: 'policy-not-found', message: 'Policy was not found.' } });
+  });
+
+  fastify.put('/api/agents/:agentId/policy', async (request, reply) => {
+    const owner = userId(request, reply);
+    if (!owner) return;
+    const { agentId } = request.params as { agentId: string };
+    if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
     try {
-      // Basic validation
-      if (!body || typeof body.agentId !== 'string' || typeof body.kind !== 'string' || typeof body.action !== 'string') {
-        return reply.status(400).send({ error: { code: 'invalid-intent', message: 'Malformed intent' } });
-      }
+      const policy = policyInput(request.body);
+      repository.upsertPolicy(owner, agentId, policy);
+      repository.addActivity({ userId: owner, agentId, event: 'policy-updated' });
+      return { ...policy, dailyLimit: policy.dailyLimit.toString(), perTransactionLimit: policy.perTransactionLimit.toString() };
+    } catch {
+      return reply.status(400).send({ error: { code: 'invalid-policy', message: 'Policy is invalid.' } });
+    }
+  });
 
-      const intent: any = { ...body };
-      if (intent.action === 'spend') {
-        intent.amount = parseAmountStrict(body.amount);
-      }
+  fastify.get('/api/agents/:agentId/activity', async (request, reply) => {
+    const owner = userId(request, reply);
+    if (!owner) return;
+    const { agentId } = request.params as { agentId: string };
+    if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
+    return repository.listActivity(owner, agentId);
+  });
 
-      const decision = authorization.authorize({ intent });
-      // Map decision to response
-      if (decision.decision === 'allowed') {
-        return reply.send({ decision: 'allowed', message: 'Application pre-validation passed; Midnight authorization is still required.' , decisionDetail: decision });
-      }
-      return reply.status(403).send({ decision: 'rejected', code: decision.code, reason: decision.reason });
-    } catch (err: unknown) {
-      return reply.status(400).send({ error: { code: 'invalid-amount', message: (err as Error).message } });
+  fastify.post('/api/authorization/check', async (request, reply) => {
+    try {
+      const owner = userId(request, reply);
+      if (!owner) return;
+      const parsed = intent(request.body);
+      const agent = manager.forUser(owner).getAgent(String(parsed.agentId));
+      if (!agent) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
+      const decision = getAuthorization(owner, agent.agentId).authorize({ intent: parsed as never });
+      repository.addActivity({ userId: owner, agentId: agent.agentId, event: decision.decision === 'allowed' ? 'authorization-allowed' : 'authorization-rejected' });
+      return decision.decision === 'allowed' ? reply.send({ decision: 'allowed', reason: decision.reason }) : reply.status(403).send({ decision: 'rejected', code: decision.code, reason: decision.reason });
+    } catch {
+      return reply.status(400).send({ error: { code: 'invalid-intent', message: 'Proposal is invalid.' } });
     }
   });
 
   fastify.post('/api/authorization/execute', async (request, reply) => {
-    if (!execution) return reply.status(501).send({ error: { code: 'execution-not-available', message: 'Server does not have execution configured' } });
-    const body = request.body as any;
+    const owner = userId(request, reply);
+    if (!owner) return;
+    let parsed: Record<string, unknown>;
     try {
-      if (!body || typeof body.agentId !== 'string' || typeof body.kind !== 'string' || typeof body.action !== 'string') {
-        return reply.status(400).send({ error: { code: 'invalid-intent', message: 'Malformed intent' } });
+      parsed = intent(request.body);
+      if (parsed.action !== 'spend') throw new Error('Only spend intents may be executed.');
+      const rawBody = request.body as Record<string, unknown>;
+      if ('recipientCommitment' in rawBody || 'categoryCommitment' in rawBody) {
+        throw new Error('Client-supplied policy commitments are not accepted.');
       }
-      if (body.action !== 'spend') return reply.status(400).send({ error: { code: 'unsupported-action', message: 'Only spend intents may be executed' } });
-      const amount = parseAmountStrict(body.amount);
-      const recipientCommitment = validateHex32(body.recipientCommitment);
-      const categoryCommitment = validateHex32(body.categoryCommitment);
-      const intent = { ...body, amount };
+    } catch {
+      return reply.status(400).send({ error: { code: 'invalid-request', message: 'Execution request is invalid.' } });
+    }
+    if (!execution) return reply.status(503).send({ error: { code: 'execution-not-available', message: 'Execution service is unavailable.' } });
 
-      // pre-validation
-      const pre = authorization.authorize({ intent });
-      if (pre.decision !== 'allowed') {
-        return reply.status(403).send({ error: { code: pre.code ?? 'pre-validation-failed', message: pre.reason } });
-      }
-
-      try {
-        const result = await execution.authorizeSpend({ intent, recipientCommitment, categoryCommitment });
-        return reply.send(result);
-              } catch (err: unknown) {
-        console.error('Vouch execution failed:', err);
-
-        return reply.status(502).send({
-          error: {
-            code: 'execution-failed',
-            message: 'Midnight authorization execution failed.',
-          },
-        });
-      }
-      
-    } catch (err: unknown) {
-      return reply.status(400).send({ error: { code: 'invalid-request', message: (err as Error).message } });
+    try {
+      const agent = manager.forUser(owner).getAgent(String(parsed.agentId));
+      if (!agent) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
+      const decision = getAuthorization(owner, agent.agentId).authorize({ intent: parsed as never });
+      if (decision.decision !== 'allowed') return reply.status(403).send({ error: { code: decision.code, message: decision.reason } });
+      repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-attempted' });
+      const result = await execution.authorizeSpend({ intent: parsed as never });
+      repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-confirmed', transactionId: result.transactionId });
+      return result;
+    } catch (error) {
+      request.log.error(error);
+      return reply.status(502).send({ error: { code: 'execution-failed', message: 'Midnight execution failed.' } });
     }
   });
 }

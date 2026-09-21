@@ -2,8 +2,6 @@ import type { AgentIntent } from '../agent-runtime/types.js';
 
 export interface VouchExecutionRequest {
   readonly intent: AgentIntent;
-  readonly recipientCommitment: Uint8Array;
-  readonly categoryCommitment: Uint8Array;
 }
 
 export interface SuccessfulVouchExecution {

@@ -7,6 +7,7 @@ import { createWallet, type WalletContext } from '../wallet.js';
 import { loadVouchPrivateState } from './config.js';
 import {
   assertPrivateStateShape,
+  commitmentForPolicyValue,
   commitmentForSecret,
   createVouchProviders,
   VOUCH_PRIVATE_STATE_ID,
@@ -34,9 +35,8 @@ export class VouchExecutionService {
     if (request.intent.action !== 'spend') {
       throw new VouchExecutionError('execution-failed', 'Only spend intents can be executed by this service.');
     }
-    if (request.recipientCommitment.length !== 32 || request.categoryCommitment.length !== 32) {
-      throw new VouchExecutionError('execution-failed', 'Recipient and category commitments must be 32 bytes.');
-    }
+    const recipientCommitment = commitmentForPolicyValue(request.intent.recipient.trim());
+    const categoryCommitment = commitmentForPolicyValue(request.intent.category.trim());
 
     const deployment = getDeployment(this.network);
     if (!deployment) {
@@ -70,8 +70,8 @@ export class VouchExecutionService {
     try {
       const finalized = await deployed.callTx.requestSpend(
         request.intent.amount,
-        request.recipientCommitment,
-        request.categoryCommitment,
+        recipientCommitment,
+        categoryCommitment,
       );
       return {
         status: 'confirmed',

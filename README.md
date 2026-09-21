@@ -89,10 +89,23 @@ pnpm frontend:dev
 
 The Vite development server proxies `/api/` to `http://127.0.0.1:3000`.
 `pnpm build` type-checks the backend and frontend and creates the production
-bundle in `dist/frontend`. Agent state is currently in-memory, and the UI
-shows empty states rather than inventing activity or balances. Application
-authorization checks are presented as pre-validation; Midnight remains
-authoritative for cryptographic authorization and final transaction outcomes.
+bundle in `dist/frontend`. Application metadata is stored in SQLite at
+`data/vouch.sqlite` by default; override this with `VOUCH_DATABASE`. The
+database stores users, agents, application policies, and audit activity only.
+Midnight private state, wallet secrets, and transaction state are never copied
+into it.
+
+API requests must carry a wallet identity in `x-vouch-wallet-address`. This is
+an explicitly unauthenticated development boundary, not proof of wallet
+ownership. Production wallet authentication can replace it without changing
+repository ownership checks. Agents and policies are always resolved within
+that owner.
+
+The API provides agent lifecycle routes, `GET`/`PUT
+/api/agents/:agentId/policy`, and `GET /api/agents/:agentId/activity`.
+`/api/authorization/check` is application pre-validation only. Execution uses
+the existing configurable Midnight adapter and reports an explicit error when
+the adapter or deployment is unavailable.
 
 ---
 
@@ -406,8 +419,9 @@ The following parts are still being developed:
 - Dashboard
 - Transaction/activity display
 - Rejected transaction explanations
-- Preprod deployment
-- Automated tests
+- Preprod deployment through Midnight's recommended website/tooling (not the
+  CLI)
+- Frontend transaction/activity display
 - CI/CD
 
 ---
@@ -480,9 +494,14 @@ Vouch scripts:
 export PRIVATE_STATE_PASSWORD='use-at-least-16-characters'
 export VOUCH_OWNER_SECRET='64-hex-characters'
 export VOUCH_AGENT_SECRET='64-hex-characters'
-export VOUCH_ALLOWED_RECIPIENT_COMMITMENT='64-hex-characters'
-export VOUCH_ALLOWED_CATEGORY_COMMITMENT='64-hex-characters'
+export VOUCH_ALLOWED_RECIPIENT='canonical-recipient'
+export VOUCH_ALLOWED_CATEGORY='canonical-category'
 ```
+
+The server canonicalizes these values by trimming surrounding whitespace and
+derives the 32-byte SHA-256 commitments used by the existing Compact witness.
+Execution requests must provide the same canonical recipient and category
+text; clients cannot supply independent commitment bytes.
 
 `pnpm run setup` deploys the Vouch Compact contract. After deployment,
 `pnpm run execution:demo` invokes the generated Vouch circuits through the real

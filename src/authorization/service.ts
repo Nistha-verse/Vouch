@@ -7,6 +7,7 @@ import {
   type AuthorizationReasonCode,
   type AuthorizationRequest,
 } from './types.js';
+import { canonicalCategory, canonicalRecipient } from './canonical.js';
 
 const MAX_AGENT_ID_LENGTH = 64;
 const MAX_RECIPIENT_LENGTH = 64;
@@ -105,11 +106,13 @@ export class AuthorizationService {
       return rejected(agentId, intent.action, 'daily-limit', 'The amount exceeds the remaining daily spending limit.');
     }
 
-    if (state.policy.allowedCategories && !state.policy.allowedCategories.includes(intent.category)) {
+    const canonicalCategoryValue = canonicalCategory(intent.category);
+    const canonicalRecipientValue = canonicalRecipient(intent.recipient);
+    if (state.policy.allowedCategories && !state.policy.allowedCategories.includes(canonicalCategoryValue)) {
       return rejected(agentId, intent.action, 'category-not-allowed', 'The spend category is not allowed by policy.');
     }
 
-    if (state.policy.allowedRecipients && !state.policy.allowedRecipients.includes(intent.recipient)) {
+    if (state.policy.allowedRecipients && !state.policy.allowedRecipients.includes(canonicalRecipientValue)) {
       return rejected(agentId, intent.action, 'recipient-not-allowed', 'The recipient is not allowed by policy.');
     }
 
@@ -188,11 +191,11 @@ function validateAmount(amount: unknown): string | undefined {
 }
 
 function validateSpendFields(intent: Record<string, unknown>): string | undefined {
-  if (!isBoundedText(intent.recipient, MAX_RECIPIENT_LENGTH)) {
-    return 'Recipient must be non-empty and within the maximum length.';
-  }
-  if (!isBoundedText(intent.category, MAX_CATEGORY_LENGTH)) {
-    return 'Category must be non-empty and within the maximum length.';
+  try {
+    canonicalRecipient(intent.recipient);
+    canonicalCategory(intent.category);
+  } catch {
+    return 'Recipient and category must be non-empty and within the maximum length.';
   }
   if (!isBoundedText(intent.reason, MAX_REASON_LENGTH)) {
     return 'Reason must be non-empty and within the maximum length.';

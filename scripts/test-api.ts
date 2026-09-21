@@ -2,7 +2,8 @@ import { strict as assert } from 'node:assert';
 import { createApp } from '../src/server/app.js';
 
 async function run() {
-  const { fastify } = createApp();
+  const { fastify } = createApp({ databasePath: ':memory:' });
+  const headers = { 'x-vouch-wallet-address': 'test-wallet-a' };
 
   // Health
   const health = await fastify.inject({ method: 'GET', url: '/health' });
@@ -11,35 +12,36 @@ async function run() {
   assert.equal(h.status, 'ok');
 
   // Create agent
-  const create = await fastify.inject({ method: 'POST', url: '/api/agents', payload: { name: 'TestAgent', type: 'developer' } });
+  const create = await fastify.inject({ method: 'POST', url: '/api/agents', headers, payload: { name: 'TestAgent', type: 'developer' } });
   assert.equal(create.statusCode, 201, `create failed: ${create.payload}`);
   const agent = JSON.parse(create.payload);
   assert.ok(agent.agentId, 'no agentId');
 
   // List
-  const list = await fastify.inject({ method: 'GET', url: '/api/agents' });
+  const list = await fastify.inject({ method: 'GET', url: '/api/agents', headers });
   assert.equal(list.statusCode, 200);
   const arr = JSON.parse(list.payload);
   assert.ok(Array.isArray(arr) && arr.length >= 1);
 
   // Get agent
-  const get = await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}` });
+  const get = await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}`, headers });
   assert.equal(get.statusCode, 200);
 
   // Activate
-  const activate = await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/activate` });
-  assert.equal(activate.statusCode, 200);
+  const activate = await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/activate`, headers });
+  assert.equal(activate.statusCode, 200, activate.payload);
   const activated = JSON.parse(activate.payload);
   assert.equal(activated.status, 'active');
 
   // Authorization malformed amount
-  const badAmount = await fastify.inject({ method: 'POST', url: '/api/authorization/check', payload: { agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '1.23', recipient: 'x', category: 'y', reason: 'z' } });
+  const badAmount = await fastify.inject({ method: 'POST', url: '/api/authorization/check', headers, payload: { agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '1.23', recipient: 'x', category: 'y', reason: 'z' } });
   assert.equal(badAmount.statusCode, 400);
 
   // Spend is rejected when no authorization policy allows the agent.
   const authorization = await fastify.inject({
     method: 'POST',
     url: '/api/authorization/check',
+    headers,
     payload: {
       agentId: agent.agentId,
       kind: 'proposal',
@@ -53,8 +55,8 @@ async function run() {
   assert.equal(authorization.statusCode, 403);
 
   // Missing agent in authorization
-  const unknown = await fastify.inject({ method: 'POST', url: '/api/authorization/check', payload: { agentId: 'agent-unknown', kind: 'proposal', action: 'observe', subject: 'x' } });
-  assert.equal(unknown.statusCode, 403);
+  const unknown = await fastify.inject({ method: 'POST', url: '/api/authorization/check', headers, payload: { agentId: 'agent-unknown', kind: 'proposal', action: 'observe', subject: 'x' } });
+  assert.equal(unknown.statusCode, 404);
 
   console.log('All API smoke tests passed');
   await fastify.close();

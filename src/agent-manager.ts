@@ -7,6 +7,7 @@ import {
   type AgentStatus,
   type AgentType,
 } from './agent-identity.js';
+import type { AgentRepository, IdentityUpdate } from './persistence/database.js';
 
 export type AgentManagerErrorCode =
   | 'invalid-name'
@@ -39,9 +40,11 @@ export interface AgentCreateInput {
 export class AgentManager {
   private readonly ownerId?: string;
   private readonly agents = new Map<string, AgentIdentity>();
+  private readonly repository?: AgentRepository;
 
-  constructor(ownerId?: string) {
+  constructor(ownerId?: string, repository?: AgentRepository) {
     this.ownerId = ownerId;
+    this.repository = repository;
   }
 
   getOwnerId(): string | undefined {
@@ -49,11 +52,17 @@ export class AgentManager {
   }
 
   listAgents(): AgentIdentity[] {
+    if (this.repository && this.ownerId) return this.repository.listAgents(this.ownerId);
     return [...this.agents.values()];
   }
 
   getAgent(agentId: string): AgentIdentity | undefined {
+    if (this.repository && this.ownerId) return this.repository.getAgent(this.ownerId, agentId);
     return this.agents.get(agentId);
+  }
+
+  forUser(ownerId: string): AgentManager {
+    return new AgentManager(ownerId, this.repository);
   }
 
   private validateName(name: string): AgentManagerResult<string> {
@@ -103,7 +112,7 @@ export class AgentManager {
   }
 
   private assertAgentExists(agentId: string): AgentManagerResult<AgentIdentity> {
-    const agent = this.agents.get(agentId);
+    const agent = this.getAgent(agentId);
     if (!agent) {
       return {
         ok: false,
@@ -148,7 +157,12 @@ export class AgentManager {
       };
     }
 
-    this.agents.set(identity.agentId, identity);
+    if (this.repository && this.ownerId) {
+      this.repository.ensureUser(this.ownerId);
+      this.repository.createAgent(this.ownerId, identity);
+    } else {
+      this.agents.set(identity.agentId, identity);
+    }
     return { ok: true, value: identity };
   }
 
@@ -193,7 +207,7 @@ export class AgentManager {
       },
     };
 
-    this.agents.set(agentId, next);
+    this.persist(agentId, next);
     return { ok: true, value: next };
   }
 
@@ -213,7 +227,7 @@ export class AgentManager {
       name: nameResult.value,
     };
 
-    this.agents.set(agentId, next);
+    this.persist(agentId, next);
     return { ok: true, value: next };
   }
 
@@ -250,7 +264,7 @@ export class AgentManager {
       status: 'active',
     };
 
-    this.agents.set(agentId, updated);
+    this.persist(agentId, updated);
     return { ok: true, value: updated };
   }
 
@@ -287,7 +301,7 @@ export class AgentManager {
       status: 'inactive',
     };
 
-    this.agents.set(agentId, updated);
+    this.persist(agentId, updated);
     return { ok: true, value: updated };
   }
 
@@ -313,8 +327,16 @@ export class AgentManager {
       status: 'revoked',
     };
 
-    this.agents.set(agentId, updated);
+    this.persist(agentId, updated);
     return { ok: true, value: updated };
+  }
+
+  private persist(agentId: string, next: AgentIdentity): void {
+    if (this.repository && this.ownerId) {
+      this.repository.updateAgent(this.ownerId, { agentId, name: next.name, status: next.status, authorization: next.authorization });
+    } else {
+      this.agents.set(agentId, next);
+    }
   }
 }
 

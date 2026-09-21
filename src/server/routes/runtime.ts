@@ -1,15 +1,21 @@
 import type { FastifyInstance } from 'fastify';
 import { GroqBuiltInAgentRuntime } from '../../agent-runtime/groq-runtime.js';
 import type { AgentManager } from '../../agent-manager.js';
+import type { AgentRepository } from '../../persistence/database.js';
+import { scopedManager, userId } from '../request-context.js';
 
 export function registerRuntimeRoutes(
   fastify: FastifyInstance,
   manager: AgentManager,
+  repository: AgentRepository,
 ) {
   fastify.post('/api/agents/:agentId/propose', async (request, reply) => {
+    const owner = userId(request, reply);
+    if (!owner) return;
     const { agentId } = request.params as { agentId: string };
-
-    const agent = manager.getAgent(agentId);
+    const scoped = scopedManager(manager, request, reply);
+    if (!scoped) return;
+    const agent = scoped.getAgent(agentId);
 
     if (!agent) {
       return reply.status(404).send({
@@ -52,6 +58,7 @@ export function registerRuntimeRoutes(
     try {
       const runtime = new GroqBuiltInAgentRuntime(agentId);
       const intent = await runtime.receiveTask(body);
+      repository.addActivity({ userId: owner, agentId, event: 'agent-proposal' });
 
       const output = { ...intent } as Record<string, unknown>;
 

@@ -6,6 +6,7 @@ import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-p
 import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
 import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
 import { Bytes32Descriptor, persistentHash } from '@midnight-ntwrk/compact-runtime';
+import { createHash } from 'node:crypto';
 import type { VouchPrivateState } from '../vouch-policy-witnesses.js';
 import type { NetworkConfig, NetworkId } from '../network.js';
 import type { WalletContext } from '../wallet.js';
@@ -17,6 +18,15 @@ export const VOUCH_PRIVATE_STATE_ID = 'vouchPolicyPrivateState';
 
 export function commitmentForSecret(secret: Uint8Array): Uint8Array {
   return persistentHash(Bytes32Descriptor, secret);
+}
+
+/**
+ * This is the single application-to-Midnight representation for policy text.
+ * The exact canonical UTF-8 bytes are hashed with SHA-256, producing the
+ * 32-byte value expected by the existing Compact contract.
+ */
+export function commitmentForPolicyValue(value: string): Uint8Array {
+  return new Uint8Array(createHash('sha256').update(value, 'utf8').digest());
 }
 
 export function createVouchProviders(

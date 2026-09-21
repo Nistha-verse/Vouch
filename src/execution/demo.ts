@@ -45,8 +45,6 @@ try {
 
   const result = await execution.authorizeSpend({
     intent,
-    recipientCommitment: privateState.allowedRecipientCommitment,
-    categoryCommitment: privateState.allowedCategoryCommitment,
   });
   assert.equal(result.status, 'confirmed');
   console.log(`Vouch authorization confirmed on Midnight.`);
@@ -63,8 +61,6 @@ try {
   try {
     await execution.authorizeSpend({
       intent: rejectedIntent,
-      recipientCommitment: privateState.allowedRecipientCommitment,
-      categoryCommitment: privateState.allowedCategoryCommitment,
     });
     throw new Error('Compact unexpectedly accepted an over-limit authorization.');
   } catch (error) {
