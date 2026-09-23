@@ -6,6 +6,7 @@ import type { VouchExecutionService } from '../../execution/service.js';
 import type { AgentRepository } from '../../persistence/database.js';
 import { scopedManager, userId } from '../request-context.js';
 import { canonicalCategory, canonicalRecipient } from '../../authorization/canonical.js';
+import type { WalletAuthService } from '../auth.js';
 
 const decimal = /^[1-9][0-9]*$/;
 const text = (value: unknown, max: number): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
@@ -27,13 +28,17 @@ function policyInput(value: unknown): AuthorizationPolicy {
     if (!Array.isArray(input[field]) || input[field].length > 100 || !input[field].every((item) => text(item, max))) throw new Error(`Invalid ${field}.`);
     return (input[field] as string[]).map((item) => item.trim());
   };
-  return { dailyLimit, perTransactionLimit, allowedCategories: list('allowedCategories', 64), allowedRecipients: list('allowedRecipients', 256) };
+  const allowedCategories = list('allowedCategories', 64)?.map(canonicalCategory);
+  const allowedRecipients = list('allowedRecipients', 256)?.map(canonicalRecipient);
+  return { dailyLimit, perTransactionLimit, allowedCategories, allowedRecipients };
 }
 
 function intent(body: unknown): Record<string, unknown> {
   if (!body || typeof body !== 'object') throw new Error('Malformed proposal.');
   const value = body as Record<string, unknown>;
+  if ('recipientCommitment' in value || 'categoryCommitment' in value) throw new Error('Client-supplied commitments are not accepted.');
   if (value.kind !== 'proposal' || typeof value.agentId !== 'string' || (value.action !== 'spend' && value.action !== 'observe')) throw new Error('Malformed proposal.');
+  if (value.action === 'spend' && (typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 500)) throw new Error('Spend proposal reason is required.');
   return {
     ...value,
     ...(value.action === 'spend'
@@ -46,7 +51,7 @@ function intent(body: unknown): Record<string, unknown> {
   };
 }
 
-export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, execution?: VouchExecutionService) {
+export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, execution: VouchExecutionService | undefined, auth: WalletAuthService) {
   const getAuthorization = (owner: string, agentId: string) => {
     const scoped = manager.forUser(owner);
     const state = repository.getPolicy(owner, agentId);
@@ -54,7 +59,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
   };
 
   fastify.get('/api/agents/:agentId/policy', async (request, reply) => {
-    const owner = userId(request, reply);
+    const owner = userId(request, reply, auth);
     if (!owner) return;
     const { agentId } = request.params as { agentId: string };
     if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
@@ -63,7 +68,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
   });
 
   fastify.put('/api/agents/:agentId/policy', async (request, reply) => {
-    const owner = userId(request, reply);
+    const owner = userId(request, reply, auth);
     if (!owner) return;
     const { agentId } = request.params as { agentId: string };
     if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
@@ -78,7 +83,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
   });
 
   fastify.get('/api/agents/:agentId/activity', async (request, reply) => {
-    const owner = userId(request, reply);
+    const owner = userId(request, reply, auth);
     if (!owner) return;
     const { agentId } = request.params as { agentId: string };
     if (!manager.forUser(owner).getAgent(agentId)) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
@@ -87,7 +92,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
 
   fastify.post('/api/authorization/check', async (request, reply) => {
     try {
-      const owner = userId(request, reply);
+      const owner = userId(request, reply, auth);
       if (!owner) return;
       const parsed = intent(request.body);
       const agent = manager.forUser(owner).getAgent(String(parsed.agentId));
@@ -101,7 +106,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
   });
 
   fastify.post('/api/authorization/execute', async (request, reply) => {
-    const owner = userId(request, reply);
+    const owner = userId(request, reply, auth);
     if (!owner) return;
     let parsed: Record<string, unknown>;
     try {
@@ -122,7 +127,7 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
       const decision = getAuthorization(owner, agent.agentId).authorize({ intent: parsed as never });
       if (decision.decision !== 'allowed') return reply.status(403).send({ error: { code: decision.code, message: decision.reason } });
       repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-attempted' });
-      const result = await execution.authorizeSpend({ intent: parsed as never });
+      const result = await execution.authorizeSpend({ intent: parsed as never }, getAuthorization(owner, agent.agentId));
       repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-confirmed', transactionId: result.transactionId });
       return result;
     } catch (error) {

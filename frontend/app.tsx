@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { api, type Agent, type AgentType, type Proposal } from './api';
-import { discoverWallets, type WalletState } from './wallet';
+import { api, type Agent, type AgentType, type Proposal, type AgentTask, type Policy, type ActivityRecord } from './api';
+import { authenticateWallet, discoverWallets, type WalletState } from './wallet';
 
 const agentMeta: Record<AgentType, { label: string; description: string; image: string }> = {
   developer: { label: 'Developer', description: 'Builds, tests, and maintains technical systems.', image: '/agents/developer.png' },
@@ -28,7 +28,9 @@ export function VouchApp() {
       setNotice(error instanceof Error ? error.message : 'Unable to load agents.');
     }
   };
-  useEffect(() => { if (view !== 'landing') void refreshAgents(); }, [view]);
+  useEffect(() => {
+    if (view !== 'landing' && wallet.sessionToken) void refreshAgents();
+  }, [view, wallet.sessionToken]);
 
   if (view === 'landing') return <Landing onLaunch={() => setView('overview')} />;
   const selected = agents.find((agent) => agent.agentId === selectedId) ?? null;
@@ -55,14 +57,17 @@ function Landing({ onLaunch }: { onLaunch: () => void }) {
     <header className="landing-nav"><Logo /><button className="text-button" onClick={onLaunch}>Open app <span>↗</span></button></header>
     <section className="hero section-wrap">
       <p className="eyebrow">Bounded authority for autonomous agents</p>
-      <h1>Give your AI the ability to act.<br /><em>Not the ability to take.</em></h1>
+      <h1>You don't give your AI your wallet.<br /><em>You give it permission.</em></h1>
       <p className="hero-copy">Vouch gives autonomous agents permission to do useful work without handing them unrestricted access to your wallet.</p>
       <div className="hero-actions"><button className="button button-dark" onClick={onLaunch}>Launch Vouch <span>→</span></button><a className="button button-quiet" href="#how-it-works">See how it works <span>↓</span></a></div>
+      <div className="hero-flow" aria-label="AI proposes, Vouch decides, Midnight verifies authorization privately">
+        {['AI proposes', 'Vouch evaluates permission', 'Midnight verifies privately'].map((label, index) => <div className="hero-flow-stage" key={label}><span>0{index + 1}</span><strong>{label}</strong>{index < 2 && <i aria-hidden="true">→</i>}</div>)}
+      </div>
       <div className="hero-rule"><span>AI proposes</span><span className="rule-line" /><span>Vouch decides</span></div>
     </section>
     <section className="section-wrap split-section problem"><div><p className="eyebrow">The problem</p><h2>AI agents can act.<br />But what should they be allowed to do?</h2></div><p>Autonomous systems are becoming capable of making decisions and taking action. Giving one direct access to a wallet asks for trust where a clear boundary would be better.</p></section>
     <section className="section-wrap solution"><div className="section-heading"><p className="eyebrow">The Vouch approach</p><h2>You define the permission.<br /><em>Vouch enforces it.</em></h2></div><PolicyCard /></section>
-    <section id="how-it-works" className="section-wrap flow-section"><div className="section-heading"><p className="eyebrow">How it works</p><h2>A proposal is not a payment.</h2></div><div className="flow">{['AI', 'Proposal', 'Policy check', 'Proof / authorization', 'Midnight', 'Authorized or rejected'].map((step, index) => <div className="flow-step" key={step}><span>{String(index + 1).padStart(2, '0')}</span><strong>{step}</strong>{index < 5 && <i>↓</i>}</div>)}</div></section>
+    <section id="how-it-works" className="section-wrap flow-section"><div className="section-heading"><p className="eyebrow">How it works</p><h2>The AI proposes. Vouch decides.<br /><em>Midnight verifies.</em></h2></div><div className="flow">{['AI proposal', 'Vouch policy', 'User approval', 'Midnight proof', 'Authorized or rejected'].map((step, index) => <div className="flow-step" key={step}><span>{String(index + 1).padStart(2, '0')}</span><strong>{step}</strong>{index < 4 && <i>↓</i>}</div>)}</div></section>
     <section className="section-wrap privacy"><div className="privacy-mark">V</div><div><p className="eyebrow">Designed for privacy</p><h2>Verify permission<br />without oversharing.</h2><p>Vouch keeps the sensitive authorization layer separate from the agent’s proposal. The application can explain what is happening; Midnight remains authoritative for protected policy state and final verification.</p></div></section>
     <section className="section-wrap agents-landing"><div className="section-heading"><p className="eyebrow">The cast</p><h2>Meet your agents.</h2></div><div className="agent-grid">{(Object.keys(agentMeta) as AgentType[]).map((type) => <AgentPresentation key={type} type={type} />)}</div></section>
     <section className="final-cta section-wrap"><p className="eyebrow">Your authority, clearly kept</p><h2>Give your agents permission to act.<br /><em>Keep the authority yours.</em></h2><button className="button button-dark" onClick={onLaunch}>Launch Vouch <span>→</span></button></section>
@@ -81,18 +86,25 @@ function AgentPresentation({ type }: { type: AgentType }) {
 
 function AppNav({ view, onNavigate, wallet, onWallet }: { view: View; onNavigate: (view: View) => void; wallet: WalletState; onWallet: (state: WalletState) => void }) {
   const connect = async () => {
-    if (!wallet.manager) { setTimeout(() => onWallet(discoverWallets()), 0); return; }
-    const available = wallet.wallets;
-    const chosen = available[0];
+    if (!wallet.manager) { onWallet(discoverWallets()); return; }
+    const chosen = wallet.wallets[0];
     if (!chosen) return;
     const selected = wallet.manager.selectWallet(chosen.id);
     if (!selected.ok) { onWallet({ ...wallet, error: selected.error.message }); return; }
+    onWallet({ ...wallet, status: 'connecting', error: null });
     const result = await wallet.manager.connectSelectedWallet();
-    onWallet(result.ok ? { ...wallet, connection: result.value, error: null } : { ...wallet, error: result.error.message });
+    if (!result.ok) { onWallet({ ...wallet, status: 'disconnected', error: result.error.message }); return; }
+    try {
+      const address = result.value.api ? (await result.value.api.getUnshieldedAddress()).unshieldedAddress : null;
+      const session = await authenticateWallet(result.value);
+      onWallet({ ...wallet, connection: result.value, sessionToken: session.token, userId: session.userId, address, status: 'authenticated', error: null });
+    } catch (error) {
+      onWallet({ ...wallet, connection: result.value, sessionToken: null, userId: null, address: null, status: 'connected', error: error instanceof Error ? error.message : 'Wallet authentication failed.' });
+    }
   };
-  return <header className="app-nav"><button className="brand-button" onClick={() => onNavigate('overview')}><Logo /></button><nav aria-label="Main navigation">{views.map((item) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => onNavigate(item)}>{item}</button>)}</nav><div className="nav-right">{wallet.connection ? <span className="wallet-connected"><span className="status-dot" />{wallet.connection.walletName}</span> : <button className="button button-small" onClick={connect}>Connect wallet</button>}<button className="mobile-menu" aria-label="Open navigation">☰</button></div></header>;
+  const label = wallet.status === 'authenticated' ? `Authenticated · ${wallet.address ? `${wallet.address.slice(0, 8)}…${wallet.address.slice(-6)}` : wallet.connection?.walletName}` : wallet.status === 'connected' ? 'Connected · authenticate' : wallet.status === 'connecting' ? 'Connecting…' : 'Connect wallet';
+  return <header className="app-nav"><button className="brand-button" onClick={() => onNavigate('overview')}><Logo /></button><nav aria-label="Main navigation">{views.map((item) => <button key={item} className={view === item ? 'nav-link active' : 'nav-link'} onClick={() => onNavigate(item)}>{item}</button>)}</nav><div className="nav-right"><button className="button button-small wallet-status" onClick={connect} disabled={wallet.status === 'connecting'}><span className={`status-dot ${wallet.status}`} />{label}</button><span className="preview-label">Preview</span></div></header>;
 }
-
 function Overview({ agents, selected, onNavigate }: { agents: Agent[]; selected: Agent | null; onNavigate: (view: View) => void }) {
   const active = agents.filter((agent) => agent.status === 'active').length;
   return <div className="page"><PageIntro eyebrow="Overview" title="A calm place to give permission." description="The AI proposes the action. Vouch decides whether it is authorized." /><div className="overview-grid"><div className="feature-panel"><div className="panel-label">Selected agent</div>{selected ? <><div className="selected-agent"><img src={agentMeta[selected.type].image} alt="" /><div><h2>{selected.name}</h2><span>{agentMeta[selected.type].label} · {selected.status}</span></div></div><div className="panel-divider" /><div className="authority-note"><span className="status-dot" />{selected.authorization.status === 'authorized' ? 'Authorization is configured' : 'Authorization not configured'}<small>Application state does not replace Midnight verification.</small></div></> : <EmptyState title="No agents yet." description="Create an agent to start defining bounded authority." action="Create your first agent" onAction={() => onNavigate('agents')} />}</div><div className="stat-panel"><div><span className="panel-label">Agents</span><strong>{agents.length}</strong><small>{active} active</small></div><div><span className="panel-label">Wallet</span><strong className="stat-word">{'Not connected'}</strong><small>Connect a Midnight wallet to continue</small></div></div></div><section className="lower-section"><div className="section-title"><h2>Recent activity</h2><button className="text-button" onClick={() => onNavigate('activity')}>View all →</button></div><EmptyState title="No activity yet." description="Agent proposals and authorization events will appear here when they happen." /></section></div>;
@@ -105,14 +117,22 @@ function AgentsView({ agents, selected, onSelect, onRefresh }: { agents: Agent[]
 
 function AgentWorkspace({ agent }: { agent: Agent }) {
   const [task, setTask] = useState('Find the most useful option for this task.');
+  const [taskKind, setTaskKind] = useState<'spend' | 'observe'>('spend');
+  const [spend, setSpend] = useState({ amount: '', recipient: '', category: '', reason: '' });
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [state, setState] = useState<'idle' | 'proposed' | 'validating' | 'allowed' | 'rejected' | 'failed'>('idle');
   const [message, setMessage] = useState('');
+  const [policy, setPolicy] = useState<Policy>({ dailyLimit: '100', perTransactionLimit: '25', allowedCategories: [], allowedRecipients: [] });
+  const [policyMessage, setPolicyMessage] = useState('');
+  useEffect(() => { void api.policy(agent.agentId).then(setPolicy).catch(() => undefined); }, [agent.agentId]);
   const run = async (event: FormEvent) => {
     event.preventDefault();
     setState('proposed'); setMessage('');
     try {
-      const next = await api.propose(agent.agentId, task);
+      const input: AgentTask = taskKind === 'spend'
+        ? { action: 'spend', ...spend, reason: spend.reason || task }
+        : { action: 'observe', subject: task };
+      const next = await api.propose(agent.agentId, input);
       setProposal(next);
       setState('validating');
       const result = await api.checkAuthorization(next);
@@ -121,7 +141,16 @@ function AgentWorkspace({ agent }: { agent: Agent }) {
     } catch (error) { setState('failed'); setMessage(error instanceof Error ? error.message : 'The agent could not produce a proposal.'); }
   };
   const busy = state === 'proposed' || state === 'validating';
-  return <section className="workspace-panel"><div className="section-title"><div><p className="eyebrow">Agent runtime</p><h2>Give {agent.name} a task.</h2></div><span className="workspace-note">Proposal first. Authorization second.</span></div><form className="workspace-form" onSubmit={run}><input className="input" value={task} onChange={(event) => setTask(event.target.value)} aria-label="Task for agent" /><button className="button button-dark" disabled={busy || agent.status !== 'active'}>{busy ? 'Working…' : 'Ask agent →'}</button></form>{agent.status !== 'active' && <p className="field-hint">Activate this agent before asking it to work.</p>}{proposal && <div className="proposal-card"><div className="proposal-head"><span className="panel-label">Proposal</span><span className={`proposal-state ${state}`}>{state === 'allowed' ? 'Pre-validation passed' : state === 'rejected' ? 'Rejected' : state === 'failed' ? 'Failed' : state === 'validating' ? 'Policy check' : 'Proposed'}</span></div><div className="proposal-content"><strong>{proposal.action === 'spend' ? `Spend ${proposal.amount ?? ''}` : 'Observe'}</strong><p>{proposal.action === 'spend' ? `${proposal.category ?? 'Uncategorized'} · ${proposal.recipient ?? 'No recipient'}` : proposal.subject}</p><small>{proposal.reason ?? 'The agent proposed this action from your task.'}</small></div>{message && <div className="proposal-message">{message}</div>}{state === 'allowed' && <p className="field-hint">This is application pre-validation only. Midnight authorization and final transaction acceptance have not occurred.</p>}</div>}</section>;
+  const execute = async () => {
+    if (!proposal || state !== 'allowed') return;
+    setState('validating'); setMessage('Submitting the approved request to Midnight Preview…');
+    try {
+      const result = await api.execute(proposal);
+      setState('allowed'); setMessage(`Midnight confirmed transaction ${result.transactionId}.`);
+    } catch (error) { setState('failed'); setMessage(error instanceof Error ? error.message : 'Midnight execution failed.'); }
+  };
+  const savePolicy = async (event: FormEvent) => { event.preventDefault(); try { const saved = await api.savePolicy(agent.agentId, policy); setPolicy(saved); setPolicyMessage('Policy saved.'); } catch (error) { setPolicyMessage(error instanceof Error ? error.message : 'Unable to save policy.'); } };
+  return <section className="workspace-panel"><div className="section-title"><div><p className="eyebrow">Agent runtime</p><h2>Give {agent.name} a task.</h2></div><span className="workspace-note">Preview network · Proposal first. Authorization second.</span></div><form className="policy-editor" onSubmit={savePolicy}><div><span className="panel-label">Spending policy</span><p className="field-hint">Canonical recipients and categories are derived by Vouch.</p></div><input className="input" inputMode="numeric" value={policy.dailyLimit} onChange={(event) => setPolicy({ ...policy, dailyLimit: event.target.value })} aria-label="Daily limit" placeholder="Daily limit" /><input className="input" inputMode="numeric" value={policy.perTransactionLimit} onChange={(event) => setPolicy({ ...policy, perTransactionLimit: event.target.value })} aria-label="Per transaction limit" placeholder="Per transaction limit" /><input className="input" value={(policy.allowedRecipients ?? []).join(', ')} onChange={(event) => setPolicy({ ...policy, allowedRecipients: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} aria-label="Allowed recipients" placeholder="Allowed recipients" /><input className="input" value={(policy.allowedCategories ?? []).join(', ')} onChange={(event) => setPolicy({ ...policy, allowedCategories: event.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} aria-label="Allowed categories" placeholder="Allowed categories" /><button className="button button-quiet">Save policy</button>{policyMessage && <small className="field-hint">{policyMessage}</small>}</form><form className="workspace-form" onSubmit={run}><select className="input" value={taskKind} onChange={(event) => setTaskKind(event.target.value as 'spend' | 'observe')} aria-label="Proposal type"><option value="spend">Ask for a spend proposal</option><option value="observe">Ask for an observation</option></select>{taskKind === 'spend' ? <><input className="input" required inputMode="numeric" value={spend.amount} onChange={(event) => setSpend({ ...spend, amount: event.target.value })} placeholder="Amount (whole units)" aria-label="Proposal amount" /><input className="input" required value={spend.recipient} onChange={(event) => setSpend({ ...spend, recipient: event.target.value })} placeholder="Recipient" aria-label="Proposal recipient" /><input className="input" required value={spend.category} onChange={(event) => setSpend({ ...spend, category: event.target.value })} placeholder="Category" aria-label="Proposal category" /><input className="input" required value={spend.reason} onChange={(event) => setSpend({ ...spend, reason: event.target.value })} placeholder="Reason" aria-label="Proposal reason" /></> : <input className="input" required value={task} onChange={(event) => setTask(event.target.value)} aria-label="Observation task" placeholder="Observation task" />}<button className="button button-dark" disabled={busy || agent.status !== 'active'}>{busy ? 'Working…' : 'Ask agent →'}</button></form>{agent.status !== 'active' && <p className="field-hint">Activate this agent before asking it to work.</p>}{proposal && <div className="proposal-card"><div className="proposal-head"><span className="panel-label">Proposal</span><span className={`proposal-state ${state}`}>{state === 'allowed' ? 'Policy passed' : state === 'rejected' ? 'Rejected' : state === 'failed' ? 'Failed' : state === 'validating' ? 'Checking Midnight' : 'Proposed'}</span></div><div className="proposal-content"><strong>{proposal.action === 'spend' ? `Spend ${proposal.amount ?? ''}` : 'Observe'}</strong><p>{proposal.action === 'spend' ? `${proposal.category ?? 'Uncategorized'} · ${proposal.recipient ?? 'No recipient'}` : proposal.subject}</p><small>{proposal.reason ?? 'The agent proposed this action from your task.'}</small></div>{message && <div className="proposal-message">{message}</div>}{state === 'allowed' && proposal.action === 'spend' && <button className="button button-dark" onClick={() => void execute()}>Approve and execute on Midnight →</button>}</div>}</section>;
 }
 
 function CreateAgent({ onCreated, onCancel }: { onCreated: () => Promise<void>; onCancel: () => void }) {
@@ -138,7 +167,7 @@ function AgentCard({ agent, selected, onSelect, onRefresh }: { agent: Agent; sel
   return <article className={selected ? 'managed-agent selected' : 'managed-agent'} onClick={onSelect}><div className="managed-agent-main"><img src={meta.image} alt={`${meta.label} agent`} /><div><span className="agent-type">{meta.label} agent</span>{renaming ? <input className="inline-input" value={name} onChange={(e) => setName(e.target.value)} onClick={(e) => e.stopPropagation()} /> : <h2>{agent.name}</h2>}<div className="agent-status"><span className={`status-dot ${agent.status}`} />{agent.status}<span className="status-separator">·</span>{agent.authorization.status === 'authorized' ? 'Authorized' : 'Not authorized'}</div></div></div><div className="managed-agent-actions">{renaming ? <button className="text-button" disabled={busy} onClick={(e) => { e.stopPropagation(); void rename(); }}>Save</button> : <button className="text-button" onClick={(e) => { e.stopPropagation(); setRenaming(true); }}>Rename</button>}{agent.status !== 'revoked' && <button className="text-button" disabled={busy} onClick={(e) => { e.stopPropagation(); void mutate(agent.status === 'active' ? 'deactivate' : 'activate'); }}>{agent.status === 'active' ? 'Deactivate' : 'Activate'}</button>}{agent.status !== 'revoked' && <button className="text-button danger" disabled={busy} onClick={(e) => { e.stopPropagation(); void mutate('revoke'); }}>Revoke</button>}</div></article>;
 }
 
-function ActivityView() { return <div className="page"><PageIntro eyebrow="Activity" title="A record of what happened." description="Only events returned by the application belong here. Nothing is invented to fill the page." /><div className="wide-empty"><EmptyState title="No activity yet." description="Agent creation, proposals, and authorization outcomes will appear here when persistent activity data is available." /></div></div>; }
+function ActivityView() { const [items, setItems] = useState<ActivityRecord[]>([]); const [agentId, setAgentId] = useState(''); useEffect(() => { void api.listAgents().then((list) => { const id = list[0]?.agentId; if (id) { setAgentId(id); return api.activity(id).then(setItems); } return undefined; }).catch(() => undefined); }, []); return <div className="page"><PageIntro eyebrow="Activity" title="A record of what happened." description="Activity is loaded from the authenticated Vouch API." />{items.length ? <div className="activity-list">{items.map((item) => <article className="activity-row" key={item.id}><div><strong>{item.event}</strong><span>{new Date(item.createdAt).toLocaleString()}</span></div>{item.transactionId && <code>{item.transactionId}</code>}</article>)}</div> : <div className="wide-empty"><EmptyState title={agentId ? 'No activity yet.' : 'Select an agent first.'} description="Real proposals, policy decisions, and Midnight transaction IDs will appear here." /></div>}</div>; }
 function SettingsView({ wallet }: { wallet: WalletState }) { return <div className="page"><PageIntro eyebrow="Settings" title="Keep the essentials clear." description="Settings will appear here as the application gains supported preferences." /><div className="settings-list"><div><span>Wallet connection</span><strong>{wallet.connection ? wallet.connection.walletName : 'Not connected'}</strong></div><div><span>Network</span><strong>{wallet.connection?.networkId ?? 'No active connection'}</strong></div><div><span>Authorization</span><strong>Midnight remains authoritative</strong></div></div>{wallet.error && <div className="notice" role="alert">{wallet.error}</div>}</div>; }
 function PageIntro({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) { return <div className="page-intro"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{description}</p></div>{action}</div>; }
 function EmptyState({ title, description, action, onAction }: { title: string; description: string; action?: string; onAction?: () => void }) { return <div className="empty-state"><div className="empty-mark">V</div><h2>{title}</h2><p>{description}</p>{action && onAction && <button className="button button-dark" onClick={onAction}>{action} <span>→</span></button>}</div>; }

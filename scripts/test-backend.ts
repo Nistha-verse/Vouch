@@ -2,11 +2,27 @@ import { strict as assert } from 'node:assert';
 import { createApp } from '../src/server/app.js';
 import { canonicalCategory, canonicalRecipient } from '../src/authorization/canonical.js';
 import { commitmentForPolicyValue } from '../src/execution/midnight.js';
+import { signingKeyFromBip340, signData, signatureVerifyingKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 
 async function run() {
   const { fastify, services } = createApp({ databasePath: ':memory:' });
-  const alice = { 'x-vouch-wallet-address': 'wallet-alice' };
-  const bob = { 'x-vouch-wallet-address': 'wallet-bob' };
+  async function auth(seed: number) {
+    const challengeResponse = await fastify.inject({ method: 'POST', url: '/api/auth/challenge' });
+    const challenge = JSON.parse(challengeResponse.payload) as { challenge: string };
+    const key = signingKeyFromBip340(new Uint8Array(32).fill(seed));
+    const signature = signData(key, new TextEncoder().encode(challenge.challenge));
+    const verified = await fastify.inject({
+      method: 'POST', url: '/api/auth/verify',
+      payload: { challenge: challenge.challenge, signature: { data: challenge.challenge, signature, verifyingKey: signatureVerifyingKey(key) } },
+    });
+    assert.equal(verified.statusCode, 200, verified.payload);
+    const session = JSON.parse(verified.payload) as { token: string; userId: string };
+    return { headers: { authorization: `Bearer ${session.token}` }, userId: session.userId };
+  }
+  const aliceSession = await auth(1);
+  const bobSession = await auth(2);
+  const alice = aliceSession.headers;
+  const bob = bobSession.headers;
   assert.equal(canonicalRecipient('  vendor  '), 'vendor');
   assert.deepEqual(
     Buffer.from(commitmentForPolicyValue(canonicalRecipient('  vendor  '))).toString('hex'),
@@ -19,7 +35,7 @@ async function run() {
   const create = await fastify.inject({ method: 'POST', url: '/api/agents', headers: alice, payload: { name: 'Persistent', type: 'task' } });
   assert.equal(create.statusCode, 201);
   const agent = JSON.parse(create.payload) as { agentId: string };
-  assert.equal(services.agentManager.forUser('wallet-alice').authorizeAgent(agent.agentId, 'test-commitment').ok, true);
+  assert.equal(services.agentManager.forUser(aliceSession.userId).authorizeAgent(agent.agentId, 'test-commitment').ok, true);
 
   assert.equal((await fastify.inject({ method: 'GET', url: '/api/agents', headers: bob })).payload, '[]');
   assert.equal((await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}`, headers: bob })).statusCode, 404);

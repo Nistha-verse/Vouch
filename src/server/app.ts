@@ -8,12 +8,15 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerAgentRoutes } from './routes/agents.js';
 import { registerAuthorizationRoutes } from './routes/authorization.js';
 import { registerRuntimeRoutes } from './routes/runtime.js';
+import { WalletAuthService } from './auth.js';
+import { registerAuthRoutes } from './routes/auth.js';
 
 export interface AppServices {
   agentManager: AgentManager;
   authorization: AuthorizationService;
   repository: AgentRepository;
   execution?: VouchExecutionService;
+  auth: WalletAuthService;
 }
 
 export interface CreateAppOptions {
@@ -28,13 +31,15 @@ export function createApp(opts: CreateAppOptions = {}): {
   const repository = new SqliteAgentRepository(opts.databasePath);
   const agentManager = new AgentManager(undefined, repository);
   const authorization = new AuthorizationService({ getAgent: () => undefined });
+  const auth = new WalletAuthService();
 
   const fastify = Fastify({ logger: false });
 
   registerHealthRoutes(fastify);
-  registerAgentRoutes(fastify, agentManager, repository);
-  registerRuntimeRoutes(fastify, agentManager, repository);
-  registerAuthorizationRoutes(fastify, agentManager, repository, opts.execution);
+  registerAuthRoutes(fastify, auth);
+  registerAgentRoutes(fastify, agentManager, repository, auth);
+  registerRuntimeRoutes(fastify, agentManager, repository, auth);
+  registerAuthorizationRoutes(fastify, agentManager, repository, opts.execution, auth);
 
   return {
     fastify,
@@ -43,6 +48,7 @@ export function createApp(opts: CreateAppOptions = {}): {
       authorization,
       repository,
       execution: opts.execution,
+      auth,
     },
   };
 }

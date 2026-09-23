@@ -94,17 +94,21 @@ path. The database stores users, agents, lifecycle state, policies, and audit
 activity. It does not store Midnight private state, wallet recovery phrases,
 private keys, Groq API keys, or fabricated transaction state.
 
-The current development identity boundary is the
-`x-vouch-wallet-address` request header. This is explicitly unauthenticated
-development input, not proof of wallet ownership. Every agent, policy, and
-activity lookup is still scoped to that supplied application identity. A
-verified wallet authentication mechanism can replace this boundary later.
+The browser authenticates with the installed Midnight DApp Connector. It
+requests a one-time challenge, asks the wallet to sign it with its unshielded
+key, and sends the signature and verifying key to the backend. The backend
+verifies the BIP-340 signature with Midnight Ledger primitives and issues a
+short-lived bearer session. Every agent, policy, activity, proposal, and
+authorization lookup is scoped to the verifying key from that session; the
+client cannot choose an identity header.
 
 Important routes include:
 
 ```text
 GET  /health
 GET  /ready
+POST /api/auth/challenge
+POST /api/auth/verify
 
 POST /api/agents
 GET  /api/agents
@@ -222,10 +226,18 @@ corepack pnpm typecheck
 corepack pnpm build
 corepack pnpm test
 corepack pnpm test:api
+corepack pnpm test:e2e
 corepack pnpm exec compact compile \
   contracts/vouch-policy.compact \
   contracts/managed/vouch-policy
 ```
+
+The Vouch E2E harness always runs the local authenticated API, ownership,
+structured proposal, policy rejection, and commitment-rejection checks. It
+does not fabricate a network result. To exercise a real running Preview-backed
+API, set `VOUCH_E2E_LIVE=1`, `E2E_API_URL`, `VOUCH_E2E_SIGNING_KEY_HEX`,
+`E2E_AMOUNT`, `E2E_RECIPIENT`, `E2E_CATEGORY`, and `E2E_REASON`; the live path
+requires an existing authenticated agent and reports the real transaction ID.
 
 ## Architecture boundary
 
@@ -242,6 +254,11 @@ Off-chain infrastructure manages users, agents, policies, proposals, and audit
 records. Midnight protects the authorization state and performs the final
 cryptographic policy check. The current contract does not settle or transfer
 funds.
+
+Custom agents are an adapter boundary for developer integrations. The product
+does not claim to connect arbitrary third-party agents automatically: custom
+agents remain unavailable in the HTTP runtime until a trusted
+`CustomAgentAdapter` is registered by the application.
 
 ## Current status
 

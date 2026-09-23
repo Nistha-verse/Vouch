@@ -1,241 +1,186 @@
 /**
- * CLI for interacting with vouch contract
+ * Operator CLI for the deployed Vouch authorization contract.
+ *
+ * This CLI submits real Midnight transactions. It never prints wallet seeds,
+ * private-state passwords, or private witness values.
  */
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
-import { Buffer } from 'buffer';
+import { CallTxFailedError, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
+import { resolveNetwork, getDeployment, getOrCreateWallet, formatWalletBackupNotice } from './network.js';
+import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet.js';
+import { compiledVouchPolicy } from './vouch-policy.js';
+import {
+  assertPrivateStateShape,
+  commitmentForPolicyValue,
+  commitmentForSecret,
+  createVouchProviders,
+  VOUCH_PRIVATE_STATE_ID,
+} from './execution/midnight.js';
+import { loadVouchPrivateState } from './execution/config.js';
+import { canonicalCategory, canonicalRecipient } from './authorization/canonical.js';
 
-// Midnight SDK imports
-import { findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
-import { httpClientProofProvider } from '@midnight-ntwrk/midnight-js-http-client-proof-provider';
-import { indexerPublicDataProvider } from '@midnight-ntwrk/midnight-js-indexer-public-data-provider';
-import { levelPrivateStateProvider } from '@midnight-ntwrk/midnight-js-level-private-state-provider';
-import { NodeZkConfigProvider } from '@midnight-ntwrk/midnight-js-node-zk-config-provider';
-import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, getDeployment } from './network';
-import { createWallet, persistWalletState, unshieldedToken, type WalletContext } from './wallet';
-import { CompiledContract } from '@midnight-ntwrk/midnight-js-protocol/compact-js';
-
-// Enable WebSocket for GraphQL subscriptions
-// @ts-expect-error Required for wallet sync
+// @ts-expect-error Required for wallet sync.
 globalThis.WebSocket = WebSocket;
 
-// Must match the privateStateId used at deploy time so the CLI reconnects to
-// the same private state. The hello-world contract has no witnesses (empty state).
-const PRIVATE_STATE_ID = 'helloWorldPrivateState';
-
 const { network, config: networkConfig } = resolveNetwork();
-const WALLET = getOrCreateWallet(network);
-const SEED = WALLET.seed;
-{
-  const notice = formatWalletBackupNotice(WALLET, network);
-  if (notice) console.log(notice);
-}
+const deployment = getDeployment(network);
+const walletRecord = getOrCreateWallet(network);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const zkConfigPath = path.resolve(__dirname, '..', 'contracts', 'managed', 'hello-world');
-
-// Load compiled contract
-const contractPath = path.join(zkConfigPath, 'contract', 'index.js');
-
-// Check if contract is compiled
-if (!fs.existsSync(contractPath)) {
-  console.error('\n❌ Contract not compiled! Run: npm run compile\n');
-  process.exit(1);
-}
-
-const HelloWorld = await import(pathToFileURL(contractPath).href);
-
-const compiledContract = CompiledContract.make('hello-world', HelloWorld.Contract).pipe(
-  CompiledContract.withVacantWitnesses,
-  CompiledContract.withCompiledFileAssets(zkConfigPath),
-);
-
-// ─── Providers ─────────────────────────────────────────────────────────────────
-
-async function createProviders(walletCtx: WalletContext) {
-  // The SDK requires the private-state password to be at least 16 characters.
-  // The default below is a placeholder for local devnet only — set a strong
-  // password via PRIVATE_STATE_PASSWORD when you move to a non-local target.
-  const privateStatePassword = process.env.PRIVATE_STATE_PASSWORD?.trim() || 'Local-Devnet-Development-Placeholder-1';
-
-  const walletProvider = {
-    // In Midnight.js 4.1.x the WalletProvider interface returns the key objects
-    // (CoinPublicKey / EncPublicKey) directly — no longer hex strings.
-    getCoinPublicKey: () => walletCtx.shieldedSecretKeys.coinPublicKey,
-    getEncryptionPublicKey: () => walletCtx.shieldedSecretKeys.encryptionPublicKey,
-    async balanceTx(tx: any, ttl?: Date) {
-      // balanceUnboundTransaction -> finalizeRecipe is the complete balancing
-      // path in wallet-sdk 1.x; the earlier explicit signRecipe step is gone.
-      const recipe = await walletCtx.wallet.balanceUnboundTransaction(
-        tx,
-        { shieldedSecretKeys: walletCtx.shieldedSecretKeys, dustSecretKey: walletCtx.dustSecretKey },
-        { ttl: ttl ?? new Date(Date.now() + 30 * 60 * 1000) },
-      );
-      return walletCtx.wallet.finalizeRecipe(recipe);
-    },
-    submitTx: (tx: any) => walletCtx.wallet.submitTransaction(tx) as any,
-  };
-
-  const zkConfigProvider = new NodeZkConfigProvider(zkConfigPath);
-  const accountId = walletCtx.unshieldedKeystore.getBech32Address().toString();
-
-  return {
-    privateStateProvider: levelPrivateStateProvider({
-      privateStateStoreName: 'hello-world-state',
-      accountId,
-      privateStoragePasswordProvider: () => privateStatePassword,
-    }),
-    publicDataProvider: indexerPublicDataProvider(networkConfig.indexer, networkConfig.indexerWS),
-    zkConfigProvider,
-    proofProvider: httpClientProofProvider(networkConfig.proofServer, zkConfigProvider),
-    walletProvider,
-    midnightProvider: walletProvider,
-  };
-}
-
-// ─── Main CLI ──────────────────────────────────────────────────────────────────
-
-async function main() {
-  console.log('\n╔══════════════════════════════════════════════════════════════╗');
-  console.log('║                   vouch CLI                           ║');
-  console.log('╚══════════════════════════════════════════════════════════════╝\n');
-
-  const rl = createInterface({ input: stdin, output: stdout });
-
-  // Check for deployment
-  const deployment = getDeployment(network);
-  if (!deployment) {
-    console.error(`No deploy on file for network ${network}. Run \`npm run setup -- --network ${network}\` first.`);
-    process.exit(1);
+function parseAmount(value: string): bigint {
+  const trimmed = value.trim();
+  if (!/^[1-9][0-9]*$/.test(trimmed)) {
+    throw new Error('Amount must be a positive whole-number decimal string.');
   }
-  console.log(`  Contract: ${deployment.address}`);
-  console.log(`  Network: ${network}\n`);
+  return BigInt(trimmed);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof CallTxFailedError) {
+    return 'Midnight rejected the transaction, likely because the agent or policy check failed.';
+  }
+  if (error instanceof Error) return error.message;
+  return 'The Midnight transaction failed.';
+}
+
+async function showBalance(walletCtx: WalletContext): Promise<void> {
+  const state = await walletCtx.wallet.waitForSyncedState();
+  const balance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
+  const dust = state.dust.balance(new Date());
+  console.log(`\n  tNIGHT: ${balance.toLocaleString()}`);
+  console.log(`  DUST:   ${dust.toLocaleString()}\n`);
+}
+
+async function authorizeAgent(
+  deployed: Awaited<ReturnType<typeof findDeployedContract>>,
+  agentSecret: Uint8Array,
+): Promise<void> {
+  console.log('\n  Authorizing the configured agent through Midnight...');
+  try {
+    const finalized = await deployed.callTx.authorizeAgent(commitmentForSecret(agentSecret));
+    console.log('  ✓ Agent authorization confirmed by Midnight.');
+    console.log(`  Transaction ID: ${finalized.public.txId}\n`);
+  } catch (error) {
+    console.error(`  ✗ Agent authorization failed: ${errorMessage(error)}\n`);
+  }
+}
+
+async function requestSpend(
+  rl: ReturnType<typeof createInterface>,
+  deployed: Awaited<ReturnType<typeof findDeployedContract>>,
+): Promise<void> {
+  try {
+    const amount = parseAmount(await rl.question('  Amount (whole tNIGHT units): '));
+    const recipient = canonicalRecipient(await rl.question('  Recipient: '));
+    const category = canonicalCategory(await rl.question('  Category: '));
+
+    console.log('\n  Submitting spend authorization to Midnight...');
+    console.log('  Midnight will perform the final authorization and policy checks.');
+    const finalized = await deployed.callTx.requestSpend(
+      amount,
+      commitmentForPolicyValue(recipient),
+      commitmentForPolicyValue(category),
+    );
+    console.log('  ✓ Spend authorization confirmed by Midnight.');
+    console.log(`  Transaction ID: ${finalized.public.txId}\n`);
+  } catch (error) {
+    console.error(`  ✗ Spend authorization failed: ${errorMessage(error)}\n`);
+  }
+}
+
+async function main(): Promise<void> {
+  const rl = createInterface({ input: stdin, output: stdout });
+  let walletCtx: WalletContext | undefined;
 
   try {
-    const seed = SEED;
+    console.log('\n╔══════════════════════════════════════════════════════════════╗');
+    console.log('║                         Vouch CLI                            ║');
+    console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
-    console.log('  Connecting to wallet...');
-    const walletCtx = await createWallet({ network, networkConfig, seed });
-    const restoredCount = Object.values(walletCtx.restored).filter(Boolean).length;
-    if (restoredCount > 0) {
-      console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
+    if (!deployment) {
+      throw new Error(`No Vouch deployment is recorded for ${network}. Configure the deployed contract first.`);
     }
 
-    console.log('  Syncing with network...');
-    console.log('  ℹ  This may take several minutes depending on network size.');
-    console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
+    const notice = formatWalletBackupNotice(walletRecord, network);
+    if (notice) console.log(notice);
+    console.log(`  Network:  ${network}`);
+    console.log(`  Contract: ${deployment.address}\n`);
+
+    console.log('  Connecting to wallet and syncing with the network...');
+    walletCtx = await createWallet({ network, networkConfig, seed: walletRecord.seed });
     const syncStart = Date.now();
     const syncInterval = setInterval(() => {
       const elapsed = Math.round((Date.now() - syncStart) / 1000);
-      process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
+      process.stdout.write(`\r  ⏳ Syncing... (${elapsed}s elapsed)   `);
     }, 5000);
     const state = await walletCtx.wallet.waitForSyncedState();
     clearInterval(syncInterval);
-    process.stdout.write('\r  ✓ Synced with network.                                      \n');
-
-    // Persist sync state so the next run doesn't have to redo this work.
+    process.stdout.write('\r  ✓ Wallet synced.                                      \n');
     await persistWalletState(network, walletCtx);
+
     const balance = state.unshielded.balances[unshieldedToken().raw] ?? 0n;
-    console.log(`  Balance: ${balance.toLocaleString()} tNight\n`);
+    console.log(`  Wallet balance: ${balance.toLocaleString()} tNIGHT\n`);
 
-    // Surface a faucet hint when a public-network wallet has 0 tNIGHT.
-    // Reads (option 2) work without funds, but writes (option 1) need DUST
-    // generated from registered NIGHT — without this hint the next failure
-    // mode is a confusing "Insufficient Funds" deep inside the tx builder.
-    if (balance === 0n && network !== 'undeployed' && networkConfig.faucet) {
-      const address = walletCtx.unshieldedKeystore.getBech32Address();
-      console.log('  ⚠ Wallet has no tNight. Fund it from the faucet to send transactions:');
-      console.log(`     ${networkConfig.faucet}`);
-      console.log(`     Wallet address: ${address}\n`);
-    }
-
-    // Setup providers and connect to contract
-    console.log('  Connecting to contract...');
-    const providers = await createProviders(walletCtx);
-
-    const deployed: any = await findDeployedContract(providers, {
-      compiledContract: compiledContract as any,
+    const privateState = loadVouchPrivateState();
+    assertPrivateStateShape(privateState);
+    const providers = createVouchProviders(walletCtx, network, networkConfig);
+    const deployed = await findDeployedContract(providers as any, {
+      compiledContract: compiledVouchPolicy,
       contractAddress: deployment.address,
-      privateStateId: PRIVATE_STATE_ID,
-      initialPrivateState: {},
+      privateStateId: VOUCH_PRIVATE_STATE_ID,
+      initialPrivateState: privateState,
     });
+    console.log('  ✓ Connected to the deployed Vouch contract.\n');
 
-    console.log('  ✅ Connected!\n');
-
-    // Interactive CLI loop
     let running = true;
     while (running) {
-      console.log('─── Menu ───────────────────────────────────────────────────────');
-      console.log('  1. Store a message');
-      console.log('  2. Read current message');
-      console.log('  3. Check wallet balance');
+      console.log('─── Actions ───────────────────────────────────────────────────');
+      console.log('  1. Show wallet balance');
+      console.log('  2. Authorize configured agent');
+      console.log('  3. Request spend authorization');
       console.log('  4. Exit\n');
 
-      const choice = await rl.question('  Your choice: ');
-
-      switch (choice.trim()) {
-        case '1': {
-          const message = await rl.question('  Enter your message: ');
-          console.log('\n  Submitting transaction (this may take 30-60 seconds)...');
+      switch ((await rl.question('  Choose an action: ')).trim()) {
+        case '1':
           try {
-            const tx = await deployed.callTx.storeMessage(message);
-            console.log(`\n  ✅ Message stored: "${message}"`);
-            console.log(`  Transaction ID: ${tx.public.txId}`);
-            console.log(`  Block height: ${tx.public.blockHeight}\n`);
+            await showBalance(walletCtx);
           } catch (error) {
-            console.error('\n  ❌ Failed:', error instanceof Error ? error.message : error);
+            console.error(`  ✗ Could not read wallet balance: ${errorMessage(error)}\n`);
           }
           break;
-        }
-
-        case '2': {
-          console.log('\n  Reading message from blockchain...');
-          try {
-            const contractState = await providers.publicDataProvider.queryContractState(deployment.address);
-            if (contractState) {
-              const ledgerState = HelloWorld.ledger(contractState.data);
-              const message = Buffer.from(ledgerState.message).toString();
-              console.log(`\n  📋 Current message: "${message}"\n`);
-            } else {
-              console.log('\n  📋 No message found (contract state empty)\n');
-            }
-          } catch (error) {
-            console.error('\n  ❌ Failed:', error instanceof Error ? error.message : error);
-          }
+        case '2':
+          await authorizeAgent(deployed, privateState.agentSecret);
           break;
-        }
-
-        case '3': {
-          console.log('\n  Checking balance...');
-          const currentState = await walletCtx.wallet.waitForSyncedState();
-          const currentBalance = currentState.unshielded.balances[unshieldedToken().raw] ?? 0n;
-          const dustBalance = currentState.dust.balance(new Date());
-          console.log(`\n  tNight: ${currentBalance.toLocaleString()}`);
-          console.log(`  DUST: ${dustBalance.toLocaleString()}\n`);
+        case '3':
+          await requestSpend(rl, deployed);
           break;
-        }
-
         case '4':
           running = false;
-          console.log('\n  👋 Goodbye!\n');
+          console.log('\n  Goodbye.\n');
           break;
-
         default:
-          console.log('\n  ❌ Invalid choice. Please enter 1-4.\n');
+          console.log('\n  Invalid action. Choose 1-4.\n');
       }
     }
-
-    await persistWalletState(network, walletCtx);
-    await walletCtx.wallet.stop();
   } catch (error) {
-    console.error('\n❌ Error:', error instanceof Error ? error.message : error);
+    console.error(`\n  ✗ ${errorMessage(error)}\n`);
+    process.exitCode = 1;
   } finally {
     rl.close();
+    if (walletCtx) {
+      try {
+        await persistWalletState(network, walletCtx);
+      } catch (error) {
+        console.error(`  ⚠ Could not persist wallet sync state: ${errorMessage(error)}`);
+      }
+      try {
+        await walletCtx.wallet.stop();
+      } catch {
+        // Wallet may already be stopped after a failed connection.
+      }
+    }
   }
 }
 
-main().catch(console.error);
+void main();

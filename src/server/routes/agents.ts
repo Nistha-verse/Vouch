@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { AgentManager } from '../../agent-manager.js';
 import type { AgentRepository } from '../../persistence/database.js';
 import { scopedManager, userId } from '../request-context.js';
+import type { WalletAuthService } from '../auth.js';
 
 function isValidAgentType(v: unknown): v is 'developer' | 'research' | 'task' | 'custom' {
   return v === 'developer' || v === 'research' || v === 'task' || v === 'custom';
@@ -11,10 +12,10 @@ function statusFor(code: string): number {
   return code === 'agent-not-found' ? 404 : code.startsWith('already-') ? 409 : 400;
 }
 
-export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository) {
+export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, auth: WalletAuthService) {
   fastify.post('/api/agents', async (request, reply) => {
-    const scoped = scopedManager(manager, request, reply);
-    const owner = userId(request, reply);
+    const scoped = scopedManager(manager, request, reply, auth);
+    const owner = userId(request, reply, auth);
     if (!scoped || !owner) return;
     const body = request.body as { name?: unknown; type?: unknown } | undefined;
     if (typeof body?.name !== 'string' || !body.name.trim()) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Agent name is required.' } });
@@ -31,12 +32,12 @@ export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentMana
   });
 
   fastify.get('/api/agents', async (request, reply) => {
-    const scoped = scopedManager(manager, request, reply);
+    const scoped = scopedManager(manager, request, reply, auth);
     return scoped ? scoped.listAgents() : undefined;
   });
 
   fastify.get('/api/agents/:agentId', async (request, reply) => {
-    const scoped = scopedManager(manager, request, reply);
+    const scoped = scopedManager(manager, request, reply, auth);
     if (!scoped) return;
     const { agentId } = request.params as { agentId: string };
     const agent = scoped.getAgent(agentId);
@@ -45,8 +46,8 @@ export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentMana
 
   for (const action of ['activate', 'deactivate', 'revoke'] as const) {
     fastify.post(`/api/agents/:agentId/${action}`, async (request, reply) => {
-      const scoped = scopedManager(manager, request, reply);
-      const owner = userId(request, reply);
+      const scoped = scopedManager(manager, request, reply, auth);
+      const owner = userId(request, reply, auth);
       if (!scoped || !owner) return;
       const { agentId } = request.params as { agentId: string };
       const result = action === 'activate' ? scoped.activateAgent(agentId) : action === 'deactivate' ? scoped.deactivateAgent(agentId) : scoped.revokeAgent(agentId);
@@ -57,7 +58,7 @@ export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentMana
   }
 
   fastify.post('/api/agents/:agentId/rename', async (request, reply) => {
-    const scoped = scopedManager(manager, request, reply);
+    const scoped = scopedManager(manager, request, reply, auth);
     if (!scoped) return;
     const { agentId } = request.params as { agentId: string };
     const body = request.body as { name?: unknown } | undefined;

@@ -1,6 +1,10 @@
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { ApiError } from './errors.js';
+import { resolveNetwork, getOrCreateWallet } from '../network.js';
+import { createWallet } from '../wallet.js';
+import { createVouchExecutionService } from '../execution/service.js';
+import { AuthorizationService } from '../authorization/service.js';
 
 async function main() {
   let config;
@@ -15,7 +19,22 @@ async function main() {
     process.exit(1);
   }
 
-  const { fastify } = createApp();
+  let execution;
+  try {
+    const resolved = resolveNetwork({ env: process.env });
+    const credentials = getOrCreateWallet(resolved.network);
+    const wallet = await createWallet({ network: resolved.network, networkConfig: resolved.config, seed: credentials.seed });
+    await wallet.wallet.waitForSyncedState();
+    execution = await createVouchExecutionService(
+      new AuthorizationService({ getAgent: () => undefined }),
+      resolved.network,
+      resolved.config,
+      wallet,
+    );
+  } catch (error) {
+    console.error('Midnight execution is unavailable:', error instanceof Error ? error.message : error);
+  }
+  const { fastify } = createApp({ execution });
 
   fastify.setErrorHandler((error, _request, reply) => {
     if (error instanceof ApiError) {

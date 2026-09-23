@@ -28,8 +28,21 @@ export interface ApiErrorShape {
   reason?: string;
 }
 
+let sessionToken: string | null = null;
+
+export function setSessionToken(token: string | null): void {
+  sessionToken = token;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...init?.headers } });
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      'content-type': 'application/json',
+      ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
+      ...init?.headers,
+    },
+  });
   const body = (await response.json().catch(() => ({}))) as T & ApiErrorShape;
   if (!response.ok) {
     throw new Error(body.reason ?? body.error?.message ?? `Request failed (${response.status})`);
@@ -38,6 +51,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  challenge: () => request<{ challenge: string; expiresAt: string }>('/api/auth/challenge', { method: 'POST' }),
+  verify: (challenge: string, signature: { data: string; signature: string; verifyingKey: string }) =>
+    request<{ token: string; userId: string; expiresAt: string }>('/api/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ challenge, signature }),
+    }),
   listAgents: () => request<Agent[]>('/api/agents'),
   createAgent: (input: { name: string; type: AgentType }) =>
     request<Agent>('/api/agents', { method: 'POST', body: JSON.stringify(input) }),
@@ -45,14 +64,43 @@ export const api = {
     request<Agent>(`/api/agents/${id}/rename`, { method: 'POST', body: JSON.stringify({ name }) }),
   lifecycle: (id: string, action: 'activate' | 'deactivate' | 'revoke') =>
     request<Agent>(`/api/agents/${id}/${action}`, { method: 'POST' }),
-  propose: (id: string, task: string) =>
+  propose: (id: string, task: AgentTask) =>
     request<Proposal>(`/api/agents/${id}/propose`, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'observe', subject: task }),
+      body: JSON.stringify(task),
     }),
   checkAuthorization: (proposal: Proposal) =>
     request<{ decision: 'allowed'; reason: string } | { decision: 'rejected'; reason: string }>(
       '/api/authorization/check',
       { method: 'POST', body: JSON.stringify(proposal) },
     ),
+  execute: (proposal: Proposal) =>
+    request<{ status: 'confirmed'; transactionId: string; contractAddress: string }>('/api/authorization/execute', {
+      method: 'POST',
+      body: JSON.stringify(proposal),
+    }),
+  policy: (id: string) => request<Policy>(`/api/agents/${id}/policy`),
+  savePolicy: (id: string, policy: PolicyInput) =>
+    request<Policy>(`/api/agents/${id}/policy`, { method: 'PUT', body: JSON.stringify(policy) }),
+  activity: (id: string) => request<ActivityRecord[]>(`/api/agents/${id}/activity`),
 };
+
+export interface Policy {
+  dailyLimit: string;
+  perTransactionLimit: string;
+  allowedCategories?: string[];
+  allowedRecipients?: string[];
+}
+export type PolicyInput = Policy;
+export interface ActivityRecord {
+  id: number;
+  userId: string;
+  agentId: string;
+  event: string;
+  transactionId?: string;
+  createdAt: string;
+  metadata?: Record<string, string>;
+}
+
+export type AgentTask =
+  | { action: 'observe'; subject: string }
+  | { action: 'spend'; amount: string; recipient: string; category: string; reason: string };

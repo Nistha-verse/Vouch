@@ -4,7 +4,7 @@ import type {
   APIError,
 } from '@midnight-ntwrk/dapp-connector-api';
 
-export const VOUCH_TARGET_NETWORK_ID = 'preprod' as const;
+export const VOUCH_TARGET_NETWORK_ID = 'preview' as const;
 export type MidnightNetworkId = 'preprod' | 'preview' | 'mainnet' | string;
 
 export type WalletConnectionErrorCode =

@@ -27,8 +27,11 @@ export class VouchExecutionService {
     private readonly wallet: WalletContext,
   ) {}
 
-  async authorizeSpend(request: VouchExecutionRequest): Promise<SuccessfulVouchExecution> {
-    const decision = this.authorization.authorize({ intent: request.intent });
+  async authorizeSpend(
+    request: VouchExecutionRequest,
+    authorization: Pick<AuthorizationService, 'authorize'> = this.authorization,
+  ): Promise<SuccessfulVouchExecution> {
+    const decision = authorization.authorize({ intent: request.intent });
     if (decision.decision !== 'allowed') {
       throw new VouchExecutionError('pre-validation-rejected', decision.reason);
     }

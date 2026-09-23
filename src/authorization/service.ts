@@ -55,15 +55,14 @@ export class AuthorizationService {
       return rejected(agentId, readAction(intent), 'agent-inactive', `Agent ${agentId} is not active.`);
     }
 
-    if (agent.authorization.status !== 'authorized') {
-      return rejected(agentId, readAction(intent), 'agent-not-authorized', `Agent ${agentId} is not authorized.`);
-    }
-
     if (!isRecord(intent) || intent.kind !== 'proposal') {
       return rejected(agentId, readAction(intent), 'invalid-intent', 'The intent fields are invalid.');
     }
 
     if (intent.action === 'observe') {
+      if (agent.authorization.status !== 'authorized') {
+        return rejected(agentId, intent.action, 'agent-not-authorized', `Agent ${agentId} is not authorized.`);
+      }
       if (!isAgentIntent(intent)) {
         return rejected(agentId, intent.action, 'invalid-intent', 'The observation fields are invalid.');
       }

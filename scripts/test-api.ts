@@ -1,9 +1,23 @@
 import { strict as assert } from 'node:assert';
 import { createApp } from '../src/server/app.js';
+import { signingKeyFromBip340, signData, signatureVerifyingKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
 
 async function run() {
   const { fastify } = createApp({ databasePath: ':memory:' });
-  const headers = { 'x-vouch-wallet-address': 'test-wallet-a' };
+  const challengeResponse = await fastify.inject({ method: 'POST', url: '/api/auth/challenge' });
+  const challenge = JSON.parse(challengeResponse.payload) as { challenge: string };
+  const key = signingKeyFromBip340(new Uint8Array(32).fill(7));
+  const signature = signData(key, new TextEncoder().encode(challenge.challenge));
+  const verified = await fastify.inject({
+    method: 'POST',
+    url: '/api/auth/verify',
+    payload: {
+      challenge: challenge.challenge,
+      signature: { data: challenge.challenge, signature, verifyingKey: signatureVerifyingKey(key) },
+    },
+  });
+  assert.equal(verified.statusCode, 200, verified.payload);
+  const headers = { authorization: `Bearer ${(JSON.parse(verified.payload) as { token: string }).token}` };
 
   // Health
   const health = await fastify.inject({ method: 'GET', url: '/health' });
