@@ -1,5 +1,5 @@
 import { createWalletConnectionManager, type WalletConnection, type WalletConnectionManager, type WalletDescriptor } from '../src/wallet/index.js';
-import { api, setSessionToken } from './api';
+import { api, clearSessionToken, setSessionToken } from './api';
 
 export interface WalletState {
   manager: WalletConnectionManager | null;
@@ -19,10 +19,17 @@ export function discoverWallets(): WalletState {
 }
 
 export async function authenticateWallet(connection: WalletConnection): Promise<{ token: string; userId: string }> {
-  if (!connection.api) throw new Error('The connected wallet does not expose its signing API.');
-  const challenge = await api.challenge();
-  const signature = await connection.api.signData(challenge.challenge, { encoding: 'text', keyType: 'unshielded' });
-  const session = await api.verify(challenge.challenge, signature);
-  setSessionToken(session.token);
-  return { token: session.token, userId: session.userId };
+  clearSessionToken();
+  try {
+    if (!connection.api) throw new Error('The connected wallet does not expose its signing API.');
+    const challenge = await api.challenge();
+    const signature = await connection.api.signData(challenge.challenge, { encoding: 'text', keyType: 'unshielded' });
+    const session = await api.verify(challenge.challenge, signature);
+    if (!session.token) throw new Error('Wallet authentication did not return a session token.');
+    setSessionToken(session.token);
+    return { token: session.token, userId: session.userId };
+  } catch (error) {
+    clearSessionToken();
+    throw error;
+  }
 }

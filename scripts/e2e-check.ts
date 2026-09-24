@@ -32,10 +32,20 @@ async function authenticate(fastify: Awaited<ReturnType<typeof createApp>>['fast
 }
 
 async function localApiFlow(): Promise<void> {
-  const { fastify } = createApp({ databasePath: ':memory:' });
+  const { fastify, services } = createApp({ databasePath: ':memory:' });
   try {
     const health = await fastify.inject({ method: 'GET', url: '/health' });
     assert.equal(health.statusCode, 200);
+
+    // Browser-shaped challenge: JSON content-type with no body must not fail.
+    const emptyJsonChallenge = await fastify.inject({
+      method: 'POST',
+      url: '/api/auth/challenge',
+      headers: { 'content-type': 'application/json' },
+      payload: '',
+    });
+    // Empty payload with JSON content-type is rejected by Fastify; clients must omit the header.
+    assert.equal(emptyJsonChallenge.statusCode, 400);
 
     const alice = await authenticate(fastify, 11);
     const bob = await authenticate(fastify, 12);
@@ -48,7 +58,9 @@ async function localApiFlow(): Promise<void> {
     assert.equal(create.statusCode, 201, create.payload);
     const agent = JSON.parse(create.payload) as { agentId: string };
 
+    assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', payload: { name: 'No auth', type: 'task' } })).statusCode, 401);
     assert.equal((await fastify.inject({ method: 'GET', url: '/api/agents', headers: bob.headers })).payload, '[]');
+    assert.equal((await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}`, headers: bob.headers })).statusCode, 404);
     assert.equal((await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/activate`, headers: alice.headers })).statusCode, 200);
     assert.equal((await fastify.inject({
       method: 'PUT',
@@ -69,6 +81,12 @@ async function localApiFlow(): Promise<void> {
     const allowed = await fastify.inject({ method: 'POST', url: '/api/authorization/check', headers: alice.headers, payload: validProposal });
     assert.equal(allowed.statusCode, 200, allowed.payload);
 
+    assert.equal((await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/deactivate`, headers: alice.headers })).statusCode, 200);
+    const inactiveCheck = await fastify.inject({ method: 'POST', url: '/api/authorization/check', headers: alice.headers, payload: validProposal });
+    assert.equal(inactiveCheck.statusCode, 403, inactiveCheck.payload);
+    assert.match(inactiveCheck.payload, /not active/i);
+    assert.equal((await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/activate`, headers: alice.headers })).statusCode, 200);
+
     const rejected = await fastify.inject({
       method: 'POST',
       url: '/api/authorization/check',
@@ -77,6 +95,58 @@ async function localApiFlow(): Promise<void> {
     });
     assert.equal(rejected.statusCode, 403, rejected.payload);
     assert.match(rejected.payload, /per-transaction/i);
+
+    const wrongRecipient = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/check',
+      headers: alice.headers,
+      payload: { ...validProposal, recipient: 'other-vendor' },
+    });
+    assert.equal(wrongRecipient.statusCode, 403, wrongRecipient.payload);
+    assert.match(wrongRecipient.payload, /recipient/i);
+
+    const wrongCategory = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/check',
+      headers: alice.headers,
+      payload: { ...validProposal, category: 'travel' },
+    });
+    assert.equal(wrongCategory.statusCode, 403, wrongCategory.payload);
+    assert.match(wrongCategory.payload, /category/i);
+
+    // Leave only 1 unit of daily budget so a valid per-tx amount of 2 is rejected.
+    services.repository.recordSpend(alice.userId, agent.agentId, 9n);
+    const dailyRejected = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/check',
+      headers: alice.headers,
+      payload: { ...validProposal, amount: '2' },
+    });
+    assert.equal(dailyRejected.statusCode, 403, dailyRejected.payload);
+    assert.match(dailyRejected.payload, /daily/i);
+
+    const observeExecute = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/execute',
+      headers: alice.headers,
+      payload: { kind: 'proposal', agentId: agent.agentId, action: 'observe', subject: 'should not execute' },
+    });
+    assert.equal(observeExecute.statusCode, 400, observeExecute.payload);
+
+    const headerTrust = await fastify.inject({
+      method: 'POST',
+      url: '/api/agents',
+      headers: { 'x-vouch-wallet-address': 'mn_shield-addr_fake', 'content-type': 'application/json' },
+      payload: { name: 'Header Spoof', type: 'task' },
+    });
+    assert.equal(headerTrust.statusCode, 401, headerTrust.payload);
+
+    const expiredSession = await fastify.inject({
+      method: 'GET',
+      url: '/api/agents',
+      headers: { authorization: 'Bearer expired-or-invalid-token' },
+    });
+    assert.equal(expiredSession.statusCode, 401, expiredSession.payload);
 
     const malformed = await fastify.inject({
       method: 'POST',
@@ -93,6 +163,16 @@ async function localApiFlow(): Promise<void> {
       payload: { ...validProposal, recipientCommitment: '00'.repeat(32) },
     });
     assert.equal(commitments.statusCode, 400, commitments.payload);
+
+    // Without a Midnight execution service, execute must fail cleanly (no fake tx IDs).
+    const noExecution = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/execute',
+      headers: alice.headers,
+      payload: validProposal,
+    });
+    assert.equal(noExecution.statusCode, 503, noExecution.payload);
+    assert.doesNotMatch(noExecution.payload, /"transactionId"\s*:/);
   } finally {
     await fastify.close();
   }

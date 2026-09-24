@@ -36,6 +36,8 @@ async function run() {
   assert.equal(create.statusCode, 201);
   const agent = JSON.parse(create.payload) as { agentId: string };
   assert.equal(services.agentManager.forUser(aliceSession.userId).authorizeAgent(agent.agentId, 'test-commitment').ok, true);
+  assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', payload: { name: 'Missing token', type: 'task' } })).statusCode, 401);
+  assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', headers: { authorization: 'Bearer invalid-token' }, payload: { name: 'Invalid token', type: 'task' } })).statusCode, 401);
 
   assert.equal((await fastify.inject({ method: 'GET', url: '/api/agents', headers: bob })).payload, '[]');
   assert.equal((await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}`, headers: bob })).statusCode, 404);
@@ -70,7 +72,6 @@ async function run() {
   const activity = await fastify.inject({ method: 'GET', url: `/api/agents/${agent.agentId}/activity`, headers: alice });
   assert.equal(activity.statusCode, 200);
   assert.ok(JSON.parse(activity.payload).length >= 3);
-  assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', payload: { name: 'No identity' } })).statusCode, 401);
   await fastify.close();
   console.log('Backend persistence and ownership tests passed');
 }

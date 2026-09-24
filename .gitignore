@@ -60,3 +60,7 @@ temp/
 .midnight-wallet-state/
 
 midnight-level-db/
+.env.midnight
+
+# Local application database
+/data/

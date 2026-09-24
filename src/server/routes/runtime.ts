@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { GroqBuiltInAgentRuntime } from '../../agent-runtime/groq-runtime.js';
 import type { AgentManager } from '../../agent-manager.js';
 import type { AgentRepository } from '../../persistence/database.js';
-import { scopedManager, userId } from '../request-context.js';
+import { userId } from '../request-context.js';
 import type { WalletAuthService } from '../auth.js';
 
 export function registerRuntimeRoutes(
@@ -15,8 +15,7 @@ export function registerRuntimeRoutes(
     const owner = userId(request, reply, auth);
     if (!owner) return;
     const { agentId } = request.params as { agentId: string };
-    const scoped = scopedManager(manager, request, reply, auth);
-    if (!scoped) return;
+    const scoped = manager.forUser(owner);
     const agent = scoped.getAgent(agentId);
 
     if (!agent) {

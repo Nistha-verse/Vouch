@@ -28,8 +28,9 @@ function policyInput(value: unknown): AuthorizationPolicy {
     if (!Array.isArray(input[field]) || input[field].length > 100 || !input[field].every((item) => text(item, max))) throw new Error(`Invalid ${field}.`);
     return (input[field] as string[]).map((item) => item.trim());
   };
+  // Canonical lengths are authoritative (64). Keep list text checks aligned.
   const allowedCategories = list('allowedCategories', 64)?.map(canonicalCategory);
-  const allowedRecipients = list('allowedRecipients', 256)?.map(canonicalRecipient);
+  const allowedRecipients = list('allowedRecipients', 64)?.map(canonicalRecipient);
   return { dailyLimit, perTransactionLimit, allowedCategories, allowedRecipients };
 }
 
@@ -121,17 +122,24 @@ export function registerAuthorizationRoutes(fastify: FastifyInstance, manager: A
     }
     if (!execution) return reply.status(503).send({ error: { code: 'execution-not-available', message: 'Execution service is unavailable.' } });
 
+    const agentId = String(parsed.agentId);
     try {
-      const agent = manager.forUser(owner).getAgent(String(parsed.agentId));
+      const agent = manager.forUser(owner).getAgent(agentId);
       if (!agent) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
       const decision = getAuthorization(owner, agent.agentId).authorize({ intent: parsed as never });
       if (decision.decision !== 'allowed') return reply.status(403).send({ error: { code: decision.code, message: decision.reason } });
       repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-attempted' });
       const result = await execution.authorizeSpend({ intent: parsed as never }, getAuthorization(owner, agent.agentId));
+      if (result.status !== 'confirmed' || typeof result.transactionId !== 'string' || !result.transactionId.trim()) {
+        repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-failed' });
+        return reply.status(502).send({ error: { code: 'execution-failed', message: 'Midnight execution failed.' } });
+      }
+      repository.recordSpend(owner, agent.agentId, parsed.amount as bigint);
       repository.addActivity({ userId: owner, agentId: agent.agentId, event: 'execution-confirmed', transactionId: result.transactionId });
       return result;
     } catch (error) {
       request.log.error(error);
+      repository.addActivity({ userId: owner, agentId, event: 'execution-failed' });
       return reply.status(502).send({ error: { code: 'execution-failed', message: 'Midnight execution failed.' } });
     }
   });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
-import { api, type Agent, type AgentType, type Proposal, type AgentTask, type Policy, type ActivityRecord } from './api';
+import { api, clearSessionToken, type Agent, type AgentType, type Proposal, type AgentTask, type Policy, type ActivityRecord } from './api';
 import { authenticateWallet, discoverWallets, type WalletState } from './wallet';
 
 const agentMeta: Record<AgentType, { label: string; description: string; image: string }> = {
@@ -93,12 +93,13 @@ function AppNav({ view, onNavigate, wallet, onWallet }: { view: View; onNavigate
     if (!selected.ok) { onWallet({ ...wallet, error: selected.error.message }); return; }
     onWallet({ ...wallet, status: 'connecting', error: null });
     const result = await wallet.manager.connectSelectedWallet();
-    if (!result.ok) { onWallet({ ...wallet, status: 'disconnected', error: result.error.message }); return; }
+    if (!result.ok) { clearSessionToken(); onWallet({ ...wallet, status: 'disconnected', sessionToken: null, userId: null, error: result.error.message }); return; }
     try {
       const address = result.value.api ? (await result.value.api.getUnshieldedAddress()).unshieldedAddress : null;
       const session = await authenticateWallet(result.value);
       onWallet({ ...wallet, connection: result.value, sessionToken: session.token, userId: session.userId, address, status: 'authenticated', error: null });
     } catch (error) {
+      clearSessionToken();
       onWallet({ ...wallet, connection: result.value, sessionToken: null, userId: null, address: null, status: 'connected', error: error instanceof Error ? error.message : 'Wallet authentication failed.' });
     }
   };

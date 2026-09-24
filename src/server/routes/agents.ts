@@ -14,9 +14,9 @@ function statusFor(code: string): number {
 
 export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, auth: WalletAuthService) {
   fastify.post('/api/agents', async (request, reply) => {
-    const scoped = scopedManager(manager, request, reply, auth);
     const owner = userId(request, reply, auth);
-    if (!scoped || !owner) return;
+    if (!owner) return;
+    const scoped = manager.forUser(owner);
     const body = request.body as { name?: unknown; type?: unknown } | undefined;
     if (typeof body?.name !== 'string' || !body.name.trim()) return reply.status(400).send({ error: { code: 'invalid-name', message: 'Agent name is required.' } });
     if (body.type !== undefined && !isValidAgentType(body.type)) return reply.status(400).send({ error: { code: 'invalid-type', message: 'Unsupported agent type.' } });
@@ -46,9 +46,9 @@ export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentMana
 
   for (const action of ['activate', 'deactivate', 'revoke'] as const) {
     fastify.post(`/api/agents/:agentId/${action}`, async (request, reply) => {
-      const scoped = scopedManager(manager, request, reply, auth);
       const owner = userId(request, reply, auth);
-      if (!scoped || !owner) return;
+      if (!owner) return;
+      const scoped = manager.forUser(owner);
       const { agentId } = request.params as { agentId: string };
       const result = action === 'activate' ? scoped.activateAgent(agentId) : action === 'deactivate' ? scoped.deactivateAgent(agentId) : scoped.revokeAgent(agentId);
       if (!result.ok) return reply.status(statusFor(result.error.code)).send({ error: { code: result.error.code, message: 'Agent state transition was not applied.' } });

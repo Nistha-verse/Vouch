@@ -22,6 +22,7 @@ export interface AgentRepository {
   updateAgent(userId: string, agent: IdentityUpdate & { agentId: string }): AgentIdentity | undefined;
   getPolicy(userId: string, agentId: string): { policy: AuthorizationPolicy; spentToday: bigint } | undefined;
   upsertPolicy(userId: string, agentId: string, policy: AuthorizationPolicy): void;
+  recordSpend(userId: string, agentId: string, amount: bigint): void;
   addActivity(record: Omit<ActivityRecord, 'id' | 'createdAt'> & { createdAt?: string }): void;
   listActivity(userId: string, agentId: string): ActivityRecord[];
   close(): void;
@@ -131,6 +132,17 @@ export class SqliteAgentRepository implements AgentRepository {
         allowed_categories_json=excluded.allowed_categories_json, allowed_recipients_json=excluded.allowed_recipients_json
     `).run(userId, agentId, policy.dailyLimit.toString(), policy.perTransactionLimit.toString(),
       policy.allowedCategories ? json(policy.allowedCategories) : null, policy.allowedRecipients ? json(policy.allowedRecipients) : null);
+  }
+
+  recordSpend(userId: string, agentId: string, amount: bigint): void {
+    if (amount <= 0n) throw new Error('Spend amount must be positive.');
+    const current = this.getPolicy(userId, agentId);
+    if (!current) throw new Error('Unable to record spend against policy.');
+    this.db.prepare('UPDATE policies SET spent_today = ? WHERE user_id = ? AND agent_id = ?').run(
+      (current.spentToday + amount).toString(),
+      userId,
+      agentId,
+    );
   }
 
   addActivity(record: Omit<ActivityRecord, 'id' | 'createdAt'> & { createdAt?: string }): void {

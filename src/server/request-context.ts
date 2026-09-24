@@ -2,10 +2,15 @@ import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { AgentManager } from '../agent-manager.js';
 import type { WalletAuthService } from './auth.js';
 
-export function userId(request: FastifyRequest, reply: FastifyReply, auth: WalletAuthService): string | undefined {
+function bearerToken(request: FastifyRequest): string | undefined {
   const header = request.headers.authorization;
-  const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
-  const value = auth.getUserId(token);
+  if (typeof header !== 'string') return undefined;
+  const match = /^Bearer ([^\s]+)$/.exec(header);
+  return match?.[1];
+}
+
+export function userId(request: FastifyRequest, reply: FastifyReply, auth: WalletAuthService): string | undefined {
+  const value = auth.getUserId(bearerToken(request));
   if (!value) {
     void reply.status(401).send({ error: { code: 'authentication-required', message: 'A verified wallet session is required.' } });
     return undefined;

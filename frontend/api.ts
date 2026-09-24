@@ -34,17 +34,22 @@ export function setSessionToken(token: string | null): void {
   sessionToken = token;
 }
 
+export function clearSessionToken(): void {
+  setSessionToken(null);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}),
-      ...init?.headers,
-    },
-  });
+  const headers = new Headers(init?.headers);
+  // Only declare JSON when a body is present. Fastify rejects empty bodies with
+  // content-type application/json (browser challenge/activate used to 400/500).
+  if (init?.body !== undefined && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  if (sessionToken) headers.set('Authorization', `Bearer ${sessionToken}`);
+  const response = await fetch(path, { ...init, headers });
   const body = (await response.json().catch(() => ({}))) as T & ApiErrorShape;
   if (!response.ok) {
+    if (response.status === 401) clearSessionToken();
     throw new Error(body.reason ?? body.error?.message ?? `Request failed (${response.status})`);
   }
   return body as T;
@@ -66,6 +71,7 @@ export const api = {
     request<Agent>(`/api/agents/${id}/${action}`, { method: 'POST' }),
   propose: (id: string, task: AgentTask) =>
     request<Proposal>(`/api/agents/${id}/propose`, {
+      method: 'POST',
       body: JSON.stringify(task),
     }),
   checkAuthorization: (proposal: Proposal) =>
