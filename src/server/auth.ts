@@ -14,6 +14,12 @@ interface Session {
   readonly expiresAt: number;
 }
 
+interface AgentSession {
+  readonly userId: string;
+  readonly agentId: string;
+  readonly expiresAt: number;
+}
+
 export interface WalletSignature {
   readonly signature: string;
   readonly verifyingKey: string;
@@ -23,6 +29,7 @@ export interface WalletSignature {
 export class WalletAuthService {
   private readonly challenges = new Map<string, Challenge>();
   private readonly sessions = new Map<string, Session>();
+  private readonly agentSessions = new Map<string, AgentSession>();
 
   createChallenge(): { challenge: string; expiresAt: string } {
     const challenge = randomBytes(32).toString('hex');
@@ -76,5 +83,23 @@ export class WalletAuthService {
       return undefined;
     }
     return session.userId;
+  }
+
+  createAgentSession(userId: string, agentId: string): { token: string; expiresAt: string } {
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    this.agentSessions.set(token, { userId, agentId, expiresAt });
+    return { token, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  getAgentSession(token: string | undefined): AgentSession | undefined {
+    if (!token) return undefined;
+    const session = this.agentSessions.get(token);
+    if (!session) return undefined;
+    if (session.expiresAt < Date.now()) {
+      this.agentSessions.delete(token);
+      return undefined;
+    }
+    return session;
   }
 }

@@ -16,14 +16,16 @@ assert.equal(created.ok, true);
 if (!created.ok) throw new Error('Unable to create the execution demo agent.');
 assert.equal(manager.authorizeAgent(created.value.agentId, 'application-marker').ok, true);
 assert.equal(manager.activateAgent(created.value.agentId).ok, true);
+const agentSecret = manager.getAgentSecret(created.value.agentId);
+if (!agentSecret) throw new Error('Unable to load the execution demo agent identity.');
+const agentSecrets = [...privateState.agentSecrets] as [Uint8Array, Uint8Array, Uint8Array, Uint8Array];
+agentSecrets[0] = agentSecret;
 
 const authorization = new AuthorizationService(manager, new Map([
   [created.value.agentId, {
     policy: {
       dailyLimit: privateState.dailyLimit,
       perTransactionLimit: privateState.dailyLimit,
-      allowedRecipients: ['local-recipient'],
-      allowedCategories: ['local-category'],
     },
     spentToday: 0n,
   }],
@@ -45,6 +47,10 @@ try {
 
   const result = await execution.authorizeSpend({
     intent,
+    agentType: created.value.type,
+    agentSecret,
+    agentSecrets,
+    privateStateScope: `local-execution-demo:${created.value.agentId}`,
   });
   assert.equal(result.status, 'confirmed');
   console.log(`Vouch authorization confirmed on Midnight.`);
@@ -61,6 +67,10 @@ try {
   try {
     await execution.authorizeSpend({
       intent: rejectedIntent,
+      agentType: created.value.type,
+      agentSecret,
+      agentSecrets,
+      privateStateScope: `local-execution-demo:${created.value.agentId}`,
     });
     throw new Error('Compact unexpectedly accepted an over-limit authorization.');
   } catch (error) {

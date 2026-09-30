@@ -8,23 +8,32 @@ const manager = new AgentManager('owner-1');
 const active = manager.create({ name: 'Authorized Spend Agent', type: 'task' });
 const inactive = manager.create({ name: 'Inactive Agent', type: 'task' });
 const unauthorized = manager.create({ name: 'Unauthorized Agent', type: 'task' });
+const research = manager.create({ name: 'Research Agent', type: 'research' });
+const developer = manager.create({ name: 'Developer Agent', type: 'developer' });
+const custom = manager.create({ name: 'Custom Agent', type: 'custom' });
 assert.equal(active.ok, true);
 assert.equal(inactive.ok, true);
 assert.equal(unauthorized.ok, true);
-if (!active.ok || !inactive.ok || !unauthorized.ok) throw new Error('Expected demo agents to be created.');
+assert.equal(research.ok, true);
+assert.equal(developer.ok, true);
+assert.equal(custom.ok, true);
+if (!active.ok || !inactive.ok || !unauthorized.ok || !research.ok || !developer.ok || !custom.ok) {
+  throw new Error('Expected demo agents to be created.');
+}
 
 assert.equal(manager.authorizeAgent(active.value.agentId, 'commitment-active').ok, true);
 assert.equal(manager.authorizeAgent(inactive.value.agentId, 'commitment-inactive').ok, true);
 assert.equal(manager.activateAgent(active.value.agentId).ok, true);
 assert.equal(manager.activateAgent(unauthorized.value.agentId).ok, true);
+for (const agent of [research.value, developer.value, custom.value]) {
+  assert.equal(manager.authorizeAgent(agent.agentId, `commitment-${agent.type}`).ok, true);
+  assert.equal(manager.activateAgent(agent.agentId).ok, true);
+}
 
-const mutablePolicy = {
+const policy: AuthorizationPolicy = {
   dailyLimit: 100n,
   perTransactionLimit: 60n,
-  allowedCategories: ['tools'],
-  allowedRecipients: ['recipient-allowed'],
 };
-const policy: AuthorizationPolicy = mutablePolicy;
 const policyState = { policy, spentToday: 50n };
 const secondPolicyState = {
   policy: { dailyLimit: 10n, perTransactionLimit: 10n },
@@ -34,11 +43,10 @@ const service = new AuthorizationService(manager, new Map([
   [active.value.agentId, policyState],
   [inactive.value.agentId, { policy, spentToday: 0n }],
   [unauthorized.value.agentId, { policy, spentToday: 0n }],
+  [research.value.agentId, { policy, spentToday: 0n }],
+  [developer.value.agentId, { policy, spentToday: 0n }],
+  [custom.value.agentId, { policy, spentToday: 0n }],
 ]));
-
-mutablePolicy.allowedCategories.push('travel');
-mutablePolicy.allowedRecipients.push('recipient-other');
-policyState.spentToday = 0n;
 
 function spend(agentId: string, amount: bigint, category = 'tools', recipient = 'recipient-allowed'): SpendAgentIntent {
   const intent = createAgentIntent(agentId, {
@@ -66,8 +74,15 @@ const unauthorizedDecision = service.authorize({ intent: spend(unauthorized.valu
 assert.equal(unauthorizedDecision.code, 'agent-not-authorized');
 assert.equal(service.authorize({ intent: spend(active.value.agentId, 61n) }).code, 'per-transaction-limit');
 assert.equal(service.authorize({ intent: spend(active.value.agentId, 51n) }).code, 'daily-limit');
-assert.equal(service.authorize({ intent: spend(active.value.agentId, 1n, 'travel') }).code, 'category-not-allowed');
-assert.equal(service.authorize({ intent: spend(active.value.agentId, 1n, 'tools', 'recipient-other') }).code, 'recipient-not-allowed');
+assert.equal(service.authorize({ intent: spend(active.value.agentId, 1n, 'travel') }).decision, 'allowed');
+assert.equal(service.authorize({ intent: spend(active.value.agentId, 1n, 'tools', 'recipient-other') }).decision, 'allowed');
+for (const [agent, category, recipient] of [
+  [research.value, 'research', 'research-source'],
+  [developer.value, 'development', 'build-service'],
+  [custom.value, 'custom-category', 'custom-recipient'],
+] as const) {
+  assert.equal(service.authorize({ intent: spend(agent.agentId, 10n, category, recipient) }).decision, 'allowed');
+}
 const invalidAmountIntent = { ...spend(active.value.agentId, 1n), amount: 0n };
 assert.equal(service.authorize({ intent: invalidAmountIntent }).code, 'invalid-amount');
 

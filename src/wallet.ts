@@ -5,6 +5,7 @@
 // this file is the glue between that format and the wallet SDK.
 
 import { Buffer } from 'buffer';
+import * as Rx from 'rxjs';
 
 // Ledger types now come from the midnight-js-protocol barrel, which re-exports
 // ledger-v8 (8.1.0) under a stable subpath instead of depending on it directly.
@@ -33,7 +34,7 @@ import {
   saveWalletState,
   type ChildKind,
   type PersistedWalletState,
-} from './wallet-state';
+} from './wallet-state.js';
 
 export { unshieldedToken };
 export type { PersistedWalletState };
@@ -41,9 +42,10 @@ export {
   loadWalletState,
   saveWalletState,
   clearWalletState,
+  quarantineWalletState,
   WALLET_STATE_DIR,
   WALLET_STATE_VERSION,
-} from './wallet-state';
+} from './wallet-state.js';
 
 function deriveKeys(seed: string) {
   const hdWallet = HDWallet.fromSeed(Buffer.from(seed, 'hex'));
@@ -65,6 +67,20 @@ export interface WalletContext {
   restored: { shielded: boolean; unshielded: boolean; dust: boolean };
 }
 
+export interface WalletSyncOptions {
+  readonly maxDurationMs?: number;
+  readonly inactivityTimeoutMs?: number;
+  readonly diagnosticIntervalMs?: number;
+  readonly onDiagnostic?: (message: string) => void;
+}
+
+export class WalletSyncStalledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WalletSyncStalledError';
+  }
+}
+
 export interface CreateWalletOptions {
   network: NetworkId;
   networkConfig: NetworkConfig;
@@ -82,6 +98,40 @@ function warnRestoreFailure(kind: ChildKind, err: unknown): void {
   process.stderr.write(`  ⚠ Could not restore ${kind} wallet state (${msg}); falling back to fresh sync.\n`);
 }
 
+function parseSavedSnapshot(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const snapshot: unknown = JSON.parse(value);
+    return snapshot && typeof snapshot === 'object' ? snapshot as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function savedStateMatchesWallet(
+  kind: ChildKind,
+  value: unknown,
+  networkId: string,
+  shieldedSecretKeys: ReturnType<typeof ledger.ZswapSecretKeys.fromSeed>,
+  unshieldedAddress: string,
+  dustSecretKey: ReturnType<typeof ledger.DustSecretKey.fromSeed>,
+): boolean {
+  const snapshot = parseSavedSnapshot(value);
+  if (!snapshot || snapshot.networkId !== networkId) return false;
+
+  if (kind === 'shielded') {
+    const keys = snapshot.publicKeys as Record<string, unknown> | undefined;
+    return keys?.coinPublicKey === String(shieldedSecretKeys.coinPublicKey)
+      && keys.encryptionPublicKey === String(shieldedSecretKeys.encryptionPublicKey);
+  }
+  if (kind === 'unshielded') {
+    const key = snapshot.publicKey as Record<string, unknown> | undefined;
+    return key?.address === unshieldedAddress;
+  }
+  const key = snapshot.publicKey as Record<string, unknown> | undefined;
+  return String(key?.publicKey ?? '') === String(dustSecretKey.publicKey);
+}
+
 /**
  * Build the wallet facade, restoring each child from saved state when
  * available and falling back to a from-seed start when not (or when restore
@@ -97,19 +147,36 @@ export async function createWallet(opts: CreateWalletOptions): Promise<WalletCon
   const shieldedSecretKeys = ledger.ZswapSecretKeys.fromSeed(keys[Roles.Zswap]);
   const dustSecretKey = ledger.DustSecretKey.fromSeed(keys[Roles.Dust]);
   const unshieldedKeystore = createKeystore(keys[Roles.NightExternal], networkId);
+  const unshieldedAddress = unshieldedKeystore.getBech32Address().toString();
 
   const saved: PersistedWalletState = opts.restore === false
     ? {}
     : loadWalletState(opts.network, { cwd: opts.cwd });
 
   const restored = { shielded: false, unshielded: false, dust: false };
+  for (const kind of CHILD_KINDS) {
+    if (saved[kind] !== undefined && !savedStateMatchesWallet(
+      kind,
+      saved[kind],
+      networkId,
+      shieldedSecretKeys,
+      unshieldedAddress,
+      dustSecretKey,
+    )) {
+      warnRestoreFailure(kind, new Error('saved state belongs to a different wallet or network'));
+      delete saved[kind];
+    }
+  }
 
   const walletConfig = {
     networkId,
     indexerClientConnection: {
       indexerHttpUrl: opts.networkConfig.indexer,
       indexerWsUrl: opts.networkConfig.indexerWS,
+      bufferSize: 10_000,
+      resumeThreshold: 1_000,
     },
+    batchUpdates: { size: 250, timeout: 1, spacing: 0 },
     provingServerUrl: new URL(opts.networkConfig.proofServer),
     relayURL: new URL(opts.networkConfig.node.replace(/^http/, 'ws')),
     txHistoryStorage: new NoOpTransactionHistoryStorage(),
@@ -162,6 +229,68 @@ export async function createWallet(opts: CreateWalletOptions): Promise<WalletCon
   await wallet.start(shieldedSecretKeys, dustSecretKey);
 
   return { wallet, shieldedSecretKeys, dustSecretKey, unshieldedKeystore, restored };
+}
+
+export async function waitForWalletSync(
+  wallet: WalletContext['wallet'],
+  options: WalletSyncOptions = {},
+): Promise<Awaited<ReturnType<WalletContext['wallet']['waitForSyncedState']>>> {
+  const maxDurationMs = options.maxDurationMs ?? 2 * 60 * 60 * 1000;
+  const inactivityTimeoutMs = options.inactivityTimeoutMs ?? 2 * 60 * 1000;
+  const diagnosticIntervalMs = options.diagnosticIntervalMs ?? 15_000;
+  let lastProgress = '';
+  let lastProgressAt = Date.now();
+
+  const summarize = (state: Awaited<ReturnType<WalletContext['wallet']['waitForSyncedState']>>) => {
+    const progress = (value: { isStrictlyComplete(): boolean; isConnected: boolean }) => {
+      const fields = Object.entries(value as object)
+        .filter(([key, item]) => key !== 'isStrictlyComplete' && typeof item === 'bigint')
+        .map(([key, item]) => `${key}=${String(item)}`)
+        .join(',');
+      return `${value.isStrictlyComplete() ? 'complete' : 'catching-up'};connected=${value.isConnected};${fields}`;
+    };
+    return [
+      `shielded[${progress(state.shielded.state.progress)}]`,
+      `unshielded[${progress(state.unshielded.progress)}]`,
+      `dust[${progress(state.dust.state.progress)}]`,
+    ].join(' ');
+  };
+
+  let snapshot = '';
+  const subscription = wallet.state().subscribe((state) => {
+    snapshot = summarize(state);
+    if (snapshot !== lastProgress) {
+      lastProgress = snapshot;
+      lastProgressAt = Date.now();
+    }
+  });
+
+  const startedAt = Date.now();
+  let interval: ReturnType<typeof setInterval> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    interval = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      const idle = Date.now() - lastProgressAt;
+      options.onDiagnostic?.(`Sync status (${Math.round(elapsed / 1000)}s): ${snapshot || 'waiting for first SDK state'}; no progress ${Math.round(idle / 1000)}s.`);
+      if (elapsed >= maxDurationMs) {
+        reject(new WalletSyncStalledError(`Wallet sync exceeded ${Math.round(maxDurationMs / 1000)} seconds. ${snapshot}`));
+      } else if (idle >= inactivityTimeoutMs) {
+        reject(new WalletSyncStalledError(`Wallet sync made no progress for ${Math.round(inactivityTimeoutMs / 1000)} seconds. ${snapshot}`));
+      }
+    }, Math.min(diagnosticIntervalMs, 5_000));
+  });
+
+  try {
+    return await Promise.race([wallet.waitForSyncedState(), timeout]);
+  } finally {
+    subscription.unsubscribe();
+    if (interval) clearInterval(interval);
+  }
+}
+
+export function deriveWalletAddress(seed: string, networkId: NetworkId): string {
+  const keys = deriveKeys(seed);
+  return createKeystore(keys[Roles.NightExternal], networkId).getBech32Address().toString();
 }
 
 /**

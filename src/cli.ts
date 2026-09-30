@@ -58,7 +58,7 @@ async function authorizeAgent(
 ): Promise<void> {
   console.log('\n  Authorizing the configured agent through Midnight...');
   try {
-    const finalized = await deployed.callTx.authorizeAgent(commitmentForSecret(agentSecret));
+    const finalized = await deployed.callTx.authorizeTaskAgent(commitmentForSecret(agentSecret));
     console.log('  ✓ Agent authorization confirmed by Midnight.');
     console.log(`  Transaction ID: ${finalized.public.txId}\n`);
   } catch (error) {
@@ -77,7 +77,7 @@ async function requestSpend(
 
     console.log('\n  Submitting spend authorization to Midnight...');
     console.log('  Midnight will perform the final authorization and policy checks.');
-    const finalized = await deployed.callTx.requestSpend(
+    const finalized = await deployed.callTx.requestTaskSpend(
       amount,
       commitmentForPolicyValue(recipient),
       commitmentForPolicyValue(category),
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
           }
           break;
         case '2':
-          await authorizeAgent(deployed, privateState.agentSecret);
+          await authorizeAgent(deployed, privateState.agentSecrets[0]);
           break;
         case '3':
           await requestSpend(rl, deployed);

@@ -35,6 +35,17 @@ async function run() {
   const create = await fastify.inject({ method: 'POST', url: '/api/agents', headers: alice, payload: { name: 'Persistent', type: 'task' } });
   assert.equal(create.statusCode, 201);
   const agent = JSON.parse(create.payload) as { agentId: string };
+  const additionalAgents = await Promise.all(
+    (['research', 'developer', 'custom'] as const).map((type) => fastify.inject({
+      method: 'POST', url: '/api/agents', headers: alice, payload: { name: `${type} agent`, type },
+    })),
+  );
+  assert.deepEqual(additionalAgents.map((response) => response.statusCode), [201, 201, 201]);
+  const aliceAgents = services.agentManager.forUser(aliceSession.userId).listAgents();
+  assert.equal(aliceAgents.length, 4);
+  assert.equal(new Set(aliceAgents.map((item) => item.agentId)).size, 4);
+  assert.equal(new Set(aliceAgents.map((item) => Buffer.from(services.agentManager.forUser(aliceSession.userId).getAgentSecret(item.agentId) ?? []).toString('hex'))).size, 4);
+  assert.equal((await fastify.inject({ method: 'GET', url: '/api/agents', headers: bob })).payload, '[]');
   assert.equal(services.agentManager.forUser(aliceSession.userId).authorizeAgent(agent.agentId, 'test-commitment').ok, true);
   assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', payload: { name: 'Missing token', type: 'task' } })).statusCode, 401);
   assert.equal((await fastify.inject({ method: 'POST', url: '/api/agents', headers: { authorization: 'Bearer invalid-token' }, payload: { name: 'Invalid token', type: 'task' } })).statusCode, 401);
@@ -44,9 +55,36 @@ async function run() {
 
   const policy = await fastify.inject({
     method: 'PUT', url: `/api/agents/${agent.agentId}/policy`, headers: alice,
-    payload: { dailyLimit: '100', perTransactionLimit: '10', allowedCategories: ['api'], allowedRecipients: ['vendor'] },
+    payload: { dailyLimit: '100', perTransactionLimit: '10' },
   });
   assert.equal(policy.statusCode, 200);
+  const otherTypeAgents = services.agentManager.forUser(aliceSession.userId).listAgents()
+    .filter((candidate) => candidate.type !== 'task');
+  for (const [index, candidate] of otherTypeAgents.entries()) {
+    services.agentManager.forUser(aliceSession.userId).authorizeAgent(candidate.agentId, `test-${candidate.type}`);
+    const candidatePolicy = await fastify.inject({
+      method: 'PUT', url: `/api/agents/${candidate.agentId}/policy`, headers: alice,
+      payload: { dailyLimit: '100', perTransactionLimit: '10' },
+    });
+    assert.equal(candidatePolicy.statusCode, 200);
+    const activatedCandidate = await fastify.inject({
+      method: 'POST', url: `/api/agents/${candidate.agentId}/activate`, headers: alice,
+    });
+    assert.equal(activatedCandidate.statusCode, 200);
+    const candidateSpend = await fastify.inject({
+      method: 'POST', url: '/api/authorization/check', headers: alice,
+      payload: {
+        agentId: candidate.agentId, kind: 'proposal', action: 'spend', amount: '1',
+        recipient: `recipient-${index}`, category: `category-${index}`, reason: 'valid agent-specific spend',
+      },
+    });
+    assert.equal(candidateSpend.statusCode, 200, candidateSpend.payload);
+  }
+  const rejectedAllowlistPolicy = await fastify.inject({
+    method: 'PUT', url: `/api/agents/${agent.agentId}/policy`, headers: alice,
+    payload: { dailyLimit: '100', perTransactionLimit: '10', allowedCategories: ['api'], allowedRecipients: ['vendor'] },
+  });
+  assert.equal(rejectedAllowlistPolicy.statusCode, 400);
   assert.equal((await fastify.inject({
     method: 'POST', url: '/api/authorization/execute', headers: alice,
     payload: {
@@ -66,6 +104,28 @@ async function run() {
       recipient: ' vendor ', category: ' api ', reason: 'valid proposal',
     },
   })).statusCode, 200);
+  assert.equal((await fastify.inject({
+    method: 'POST', url: '/api/authorization/check', headers: alice,
+    payload: {
+      agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '1',
+      recipient: 'different-vendor', category: 'travel', reason: 'different valid intent',
+    },
+  })).statusCode, 200);
+  assert.equal((await fastify.inject({
+    method: 'POST', url: '/api/authorization/check', headers: alice,
+    payload: {
+      agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '11',
+      recipient: 'different-vendor', category: 'travel', reason: 'over per-transaction limit',
+    },
+  })).statusCode, 403);
+  services.repository.recordSpend(aliceSession.userId, agent.agentId, 95n);
+  assert.equal((await fastify.inject({
+    method: 'POST', url: '/api/authorization/check', headers: alice,
+    payload: {
+      agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '6',
+      recipient: 'different-vendor', category: 'travel', reason: 'over daily limit',
+    },
+  })).statusCode, 403);
   assert.equal((await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/revoke`, headers: alice })).statusCode, 200);
   assert.equal((await fastify.inject({ method: 'POST', url: `/api/agents/${agent.agentId}/activate`, headers: alice })).statusCode, 400);
 

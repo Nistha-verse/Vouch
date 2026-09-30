@@ -9,20 +9,16 @@ const state: VouchPrivateState = {
   dailyLimit: 100n,
   perTransactionLimit: 25n,
   spentToday: 0n,
-  allowedRecipientCommitment: commitment(1),
-  allowedCategoryCommitment: commitment(2),
   ownerSecret: commitment(3),
-  agentSecret: commitment(4),
+  agentSecrets: [commitment(4), commitment(5), commitment(6), commitment(7)],
 };
 
 const copied = createVouchPrivateState(state);
 assert.notEqual(copied, state);
-assert.notEqual(copied.allowedRecipientCommitment, state.allowedRecipientCommitment);
-assert.notEqual(copied.allowedCategoryCommitment, state.allowedCategoryCommitment);
 assert.notEqual(copied.ownerSecret, state.ownerSecret);
-assert.notEqual(copied.agentSecret, state.agentSecret);
+assert.notEqual(copied.agentSecrets, state.agentSecrets);
 
-assert.equal(typeof new VouchPolicyContract.Contract<VouchPrivateState>(witnesses).circuits.requestSpend, 'function');
+assert.equal(typeof new VouchPolicyContract.Contract<VouchPrivateState>(witnesses).circuits.requestTaskSpend, 'function');
 
 console.log('Vouch Compact contract interface and witness-state checks passed.');
 console.log('Run npm run compile before this demo; real proof execution requires the configured Midnight node and proof server.');

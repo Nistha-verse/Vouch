@@ -9,6 +9,12 @@ function bearerToken(request: FastifyRequest): string | undefined {
   return match?.[1];
 }
 
+export function bearerAgentToken(header: string | undefined): string | undefined {
+  if (typeof header !== 'string') return undefined;
+  const match = /^Vouch-Agent\s+([A-Za-z0-9_-]+)$/.exec(header);
+  return match?.[1];
+}
+
 export function userId(request: FastifyRequest, reply: FastifyReply, auth: WalletAuthService): string | undefined {
   const value = auth.getUserId(bearerToken(request));
   if (!value) {

@@ -5,7 +5,18 @@
  * No readline prompts, no .midnight-seed file.
  */
 import { resolveNetwork, getOrCreateWallet, formatWalletBackupNotice, recordDeployment } from './network';
-import { createWallet, persistWalletState, unshieldedToken } from './wallet';
+import {
+  createWallet,
+  deriveWalletAddress,
+  persistWalletState,
+  quarantineWalletState,
+  unshieldedToken,
+  waitForWalletSync,
+  WalletSyncStalledError,
+  type WalletContext,
+} from './wallet';
+import { IndexerClient } from '@midnight-ntwrk/wallet-sdk';
+import { QueryRunner } from '@midnight-ntwrk/wallet-sdk/indexer-client/effect';
 import { WebSocket } from 'ws';
 import * as Rx from 'rxjs';
 import { loadVouchPrivateState } from './execution/config.js';
@@ -13,7 +24,7 @@ import { createVouchProviders, VOUCH_PRIVATE_STATE_ID } from './execution/midnig
 import { compiledVouchPolicy } from './vouch-policy.js';
 
 // Midnight SDK imports
-import { deployContract } from '@midnight-ntwrk/midnight-js-contracts';
+import { deployContract, findDeployedContract } from '@midnight-ntwrk/midnight-js-contracts';
 
 // @ts-expect-error Required for wallet sync
 globalThis.WebSocket = WebSocket;
@@ -23,6 +34,10 @@ globalThis.WebSocket = WebSocket;
 // wallet's NIGHT balance, or the faucet is the real problem, and failing with
 // that message beats hanging.
 const DUST_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEPLOYMENT_INDEXER_VERIFY_TIMEOUT_MS = 2 * 60 * 1000;
+const DUST_REGISTRATION_MAX_ATTEMPTS = 3;
+const DUST_REGISTRATION_STATUS_CHECKS = 5;
+const DUST_REGISTRATION_STATUS_CHECK_INTERVAL_MS = 3_000;
 
 // ─── Network configuration ─────────────────────────────────────────────────────
 //
@@ -65,6 +80,120 @@ async function waitForProofServer(maxAttempts = 60, delayMs = 2000): Promise<boo
   return false;
 }
 
+async function runWithProgress<T>(
+  label: string,
+  action: () => Promise<T>,
+  progressMessage?: () => string,
+): Promise<T> {
+  const startedAt = Date.now();
+  const progress = setInterval(() => {
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    console.log(`  ${progressMessage?.() ?? `${label} is still in progress (${elapsedSeconds}s elapsed)...`}`);
+  }, 10_000);
+  try {
+    return await action();
+  } catch (error) {
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} failed after ${elapsedSeconds}s: ${message}`, { cause: error });
+  } finally {
+    clearInterval(progress);
+  }
+}
+
+function errorMessages(error: unknown, depth = 0): string[] {
+  if (depth > 5 || !(error instanceof Error)) return [String(error)];
+  return [error.message, ...(error.cause === undefined ? [] : errorMessages(error.cause, depth + 1))];
+}
+
+function isTransientRpcDisconnect(error: unknown): boolean {
+  return /websocket|web socket|socket|disconnect|connection (?:was )?closed|closed connection|1000.*normal closure|econnreset|etimedout|epipe/i
+    .test(errorMessages(error).join(' '));
+}
+
+async function waitForIndexedRegistration(
+  transactionIdentifiers: readonly string[],
+  indexerUrl: string,
+): Promise<boolean> {
+  const lookupId = transactionIdentifiers[0];
+  if (!lookupId) throw new Error('Finalized DUST registration has no transaction identifier.');
+
+  for (let check = 1; check <= DUST_REGISTRATION_STATUS_CHECKS; check++) {
+    let status;
+    try {
+      status = await QueryRunner.runPromise(
+        IndexerClient.TransactionStatus,
+        { transactionId: lookupId },
+        { url: indexerUrl },
+      );
+    } catch (error) {
+      throw new Error(
+        `Could not check Preprod indexer status for DUST registration ${lookupId}; refusing to resubmit while acceptance is uncertain: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+
+    const indexedTransaction = status.transactions.find(
+      (transaction) =>
+        transaction.__typename === 'RegularTransaction' &&
+        transactionIdentifiers.every((id) => transaction.identifiers.includes(id)),
+    );
+    if (indexedTransaction?.__typename === 'RegularTransaction') {
+      if (indexedTransaction.transactionResult.status !== 'SUCCESS') {
+        throw new Error(
+          `DUST registration ${lookupId} is indexed with status ${indexedTransaction.transactionResult.status}.`,
+        );
+      }
+      return true;
+    }
+
+    if (check < DUST_REGISTRATION_STATUS_CHECKS) {
+      await new Promise((resolve) => setTimeout(resolve, DUST_REGISTRATION_STATUS_CHECK_INTERVAL_MS));
+    }
+  }
+  return false;
+}
+
+async function submitDustRegistration(
+  wallet: WalletContext['wallet'],
+  finalized: Parameters<WalletContext['wallet']['submitTransaction']>[0],
+  indexerUrl: string,
+): Promise<string> {
+  const transactionIdentifiers = finalized.identifiers();
+  const transactionId = transactionIdentifiers.at(-1);
+  if (!transactionId || transactionIdentifiers.length === 0) {
+    throw new Error('Finalized DUST registration has no transaction identifier.');
+  }
+
+  for (let attempt = 1; attempt <= DUST_REGISTRATION_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await wallet.submitTransaction(finalized);
+    } catch (error) {
+      if (!isTransientRpcDisconnect(error)) throw error;
+
+      console.warn(
+        `  DUST registration submission lost its RPC connection (attempt ${attempt}/${DUST_REGISTRATION_MAX_ATTEMPTS}); checking the indexer before retrying...`,
+      );
+      if (await waitForIndexedRegistration(transactionIdentifiers, indexerUrl)) {
+        console.log(`  DUST registration is already finalized on Preprod: ${transactionId}`);
+        return transactionId;
+      }
+      if (attempt === DUST_REGISTRATION_MAX_ATTEMPTS) {
+        throw new Error(
+          `DUST registration ${transactionId} was not found by the Preprod indexer after ${DUST_REGISTRATION_MAX_ATTEMPTS} submission attempts.`,
+          { cause: error },
+        );
+      }
+
+      console.log(
+        `  The Preprod indexer does not show registration ${transactionId}; retrying the same finalized transaction (${attempt + 1}/${DUST_REGISTRATION_MAX_ATTEMPTS})...`,
+      );
+    }
+  }
+
+  throw new Error('DUST registration submission ended without a result.');
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -75,9 +204,11 @@ async function main() {
   const seed = SEED;
 
   console.log('─── Wallet setup ───────────────────────────────────────────────\n');
+  const derivedAddress = deriveWalletAddress(seed, network);
+  console.log(`  Signing address: ${derivedAddress}`);
   console.log('  Creating wallet...');
-  const walletCtx = await createWallet({ network, networkConfig, seed });
-  const restoredCount = Object.values(walletCtx.restored).filter(Boolean).length;
+  let walletCtx = await createWallet({ network, networkConfig, seed });
+  let restoredCount = Object.values(walletCtx.restored).filter(Boolean).length;
   if (restoredCount > 0) {
     console.log(`  Restored ${restoredCount}/3 child wallets from .midnight-wallet-state — sync will resume from saved point.`);
   }
@@ -107,15 +238,27 @@ async function main() {
   process.once('SIGTERM', () => void handleShutdown('SIGTERM'));
 
   console.log('  Syncing with network...');
-  console.log('  ℹ  This may take several minutes depending on network size.');
+  console.log('  ℹ  Sync time depends on the wallet checkpoint and number of indexed ledger events.');
   console.log('     RPC disconnection messages during sync are normal and can be safely ignored.\n');
-  const syncStart = Date.now();
-  const syncInterval = setInterval(() => {
-    const elapsed = Math.round((Date.now() - syncStart) / 1000);
-    process.stdout.write(`\r  ⏳ Still syncing... (${elapsed}s elapsed)   `);
-  }, 5000);
-  const state = await walletCtx.wallet.waitForSyncedState();
-  clearInterval(syncInterval);
+  let state: Awaited<ReturnType<typeof walletCtx.wallet.waitForSyncedState>>;
+  try {
+    state = await waitForWalletSync(walletCtx.wallet, {
+      onDiagnostic: (message) => process.stdout.write(`\r  ⏳ ${message}   \n`),
+    });
+  } catch (error) {
+    if (!(error instanceof WalletSyncStalledError) || restoredCount === 0 || network !== 'preprod') throw error;
+    console.error(`\n  ⚠ Restored Preprod checkpoint stalled: ${error.message}`);
+    console.log('  Saving the current checkpoint, then retrying once from a preserved Preprod-state backup...');
+    await persistWalletState(network, walletCtx);
+    await walletCtx.wallet.stop();
+    const backup = quarantineWalletState(network);
+    console.log(`  Preserved old Preprod wallet state at ${backup ?? 'no state directory found'}.`);
+    walletCtx = await createWallet({ network, networkConfig, seed, restore: false });
+    restoredCount = 0;
+    state = await waitForWalletSync(walletCtx.wallet, {
+      onDiagnostic: (message) => process.stdout.write(`\r  ⏳ Fresh Preprod sync: ${message}   \n`),
+    });
+  }
   process.stdout.write('\r  ✓ Synced with network.                                      \n');
 
   // Persist sync state now so a later deploy failure doesn't waste the sync work.
@@ -179,43 +322,82 @@ async function main() {
 
   // Register for DUST.
   console.log('─── DUST Token Setup ───────────────────────────────────────────\n');
-  const dustState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)));
+  const registrationState = await Rx.firstValueFrom(walletCtx.wallet.state().pipe(Rx.filter((s) => s.isSynced)));
 
-  const unregisteredUtxos = dustState.unshielded.availableCoins.filter(
+  const unregisteredUtxos = registrationState.unshielded.availableCoins.filter(
     (c: any) => !c.meta?.registeredForDustGeneration,
   );
+  let submittedRegistration = false;
   if (unregisteredUtxos.length > 0) {
     console.log(`  Registering ${unregisteredUtxos.length} NIGHT UTXOs for DUST generation...`);
     // The signDustRegistration callback (3rd arg) already produces a recipe
     // with N signatures matching N inputs. Do NOT call signRecipe again — that
     // would double-sign and the chain rejects with InputsSignaturesLengthMismatch
     // (Custom error 192). Matches upstream example-counter and example-bboard.
-    const recipe = await walletCtx.wallet.registerNightUtxosForDustGeneration(
-      unregisteredUtxos,
-      walletCtx.unshieldedKeystore.getPublicKey(),
-      (payload) => walletCtx.unshieldedKeystore.signData(payload),
-    );
-    const finalized = await walletCtx.wallet.finalizeRecipe(recipe);
-    await walletCtx.wallet.submitTransaction(finalized);
+    try {
+      const recipe = await runWithProgress('Building signed DUST registration', () =>
+        walletCtx.wallet.registerNightUtxosForDustGeneration(
+          unregisteredUtxos,
+          walletCtx.unshieldedKeystore.getPublicKey(),
+          (payload) => walletCtx.unshieldedKeystore.signData(payload),
+        ));
+      const finalized = await runWithProgress('Finalizing DUST registration transaction', () =>
+        walletCtx.wallet.finalizeRecipe(recipe));
+      console.log('  Submitting DUST registration; waiting for Midnight network finalization...');
+      const transactionId = await runWithProgress('Waiting for DUST registration finalization', () =>
+        submitDustRegistration(walletCtx.wallet, finalized, networkConfig.indexer));
+      if (!transactionId) {
+        throw new Error('Registration finalized without a transaction identifier.');
+      }
+      submittedRegistration = true;
+      console.log(`  Registration transaction finalized: ${transactionId}`);
+      console.log('  Saving wallet checkpoint so an interrupted rerun resumes from the finalized transaction...');
+      await persistWalletState(network, walletCtx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`NIGHT-to-DUST registration failed before completion: ${message}`, { cause: error });
+    }
   }
 
-  if (dustState.dust.balance(new Date()) === 0n) {
-    console.log('  Waiting for DUST tokens...');
+  // Do not await facade.waitForSyncedState() here. Registration finalization
+  // is already authoritative for the transaction; waiting for all historical
+  // DUST events again can stall while the DUST wallet catches up. Observe only
+  // the registered inputs and current projected DUST needed to continue.
+  const registeredUtxos = unregisteredUtxos;
+  let latestDustBalance = 0n;
+  const dustStateSubscription = walletCtx.wallet.state().subscribe((walletState) => {
+    latestDustBalance = walletState.dust.balance(new Date());
+  });
+  const dustBalanceNow = () => latestDustBalance;
+  const waitForCurrentDustBalance = async () => {
+    const startedAt = Date.now();
+    await new Promise<void>((resolve, reject) => {
+      const interval = setInterval(() => {
+        const balanceNow = dustBalanceNow();
+        if (balanceNow > 0n) {
+          clearInterval(interval);
+          resolve();
+          return;
+        }
+        if (Date.now() - startedAt >= DUST_WAIT_TIMEOUT_MS) {
+          clearInterval(interval);
+          reject(new Error(`No spendable DUST balance appeared within ${Math.round(DUST_WAIT_TIMEOUT_MS / 60000)} minutes.`));
+        }
+      }, 1000);
+    });
+  };
+  if (submittedRegistration && registeredUtxos.length > 0 && dustBalanceNow() === 0n) {
+    console.log('  Registration is finalized; waiting up to 5 minutes for actual DUST balance...');
+    const startedAt = Date.now();
     try {
-      await Rx.firstValueFrom(
-        walletCtx.wallet.state().pipe(
-          Rx.throttleTime(5000),
-          Rx.filter((s) => s.isSynced),
-          Rx.filter((s) => s.dust.balance(new Date()) > 0n),
-          // Without this the wait is unbounded: if DUST never generates the
-          // stream simply never emits, and the process hangs with no diagnostic
-          // until something external kills it (in CI, the job timeout).
-          Rx.timeout({ first: DUST_WAIT_TIMEOUT_MS }),
-        ),
+      await runWithProgress(
+        'Waiting for spendable DUST balance',
+        waitForCurrentDustBalance,
+        () => `Waiting for actual DUST balance (${Math.round((Date.now() - startedAt) / 1000)}s elapsed; balance ${dustBalanceNow().toLocaleString()})...`,
       );
-    } catch {
+    } catch (error) {
       const minutes = Math.round(DUST_WAIT_TIMEOUT_MS / 60000);
-      console.log(`\n  ❌ No DUST generated after ${minutes} minutes.\n`);
+      console.error(`\n  ❌ No spendable DUST balance appeared after ${minutes} minutes: ${error instanceof Error ? error.message : String(error)}\n`);
       console.log('  DUST is generated by registered NIGHT UTXOs and pays transaction fees.');
       console.log('  Common causes:');
       console.log('    • The node is not producing blocks — check: docker compose ps');
@@ -226,6 +408,21 @@ async function main() {
       console.log('');
       await walletCtx.wallet.stop();
       process.exit(1);
+    }
+  }
+  if (!submittedRegistration && dustBalanceNow() === 0n) {
+    const alreadyRegisteredNights = registrationState.unshielded.availableCoins.filter(
+      (coin: any) => coin.meta?.registeredForDustGeneration,
+    );
+    if (alreadyRegisteredNights.length === 0) {
+      throw new Error('No registered or unregistered NIGHT UTXOs were available and the wallet reports no DUST balance.');
+    }
+    console.log(`  Found ${alreadyRegisteredNights.length} already-registered NIGHT UTXOs; waiting for actual DUST balance without restarting wallet sync...`);
+    try {
+      await runWithProgress('Waiting for DUST from previously registered NIGHT', waitForCurrentDustBalance);
+    } catch (error) {
+      const minutes = Math.round(DUST_WAIT_TIMEOUT_MS / 60000);
+      throw new Error(`Previously registered NIGHT did not produce spendable DUST within ${minutes} minutes: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   }
   console.log('  DUST tokens ready!\n');
@@ -312,7 +509,10 @@ async function main() {
       }
 
       if (isDustShortage) {
-        const currentState = await walletCtx.wallet.waitForSyncedState();
+        // Read the latest facade snapshot without waiting for every child
+        // wallet to finish historical sync again. Registration was already
+        // finalized; this retry only needs the current projected DUST balance.
+        const currentState = await Rx.firstValueFrom(walletCtx.wallet.state());
         const dustBalance = currentState.dust.balance(new Date());
         if (attempt < MAX_RETRIES) {
           if (attempt === 1) {
@@ -335,11 +535,40 @@ async function main() {
   if (!deployed) throw new Error('Deployment failed after all retries');
 
   const contractAddress = deployed.deployTxData.public.contractAddress;
+  const deploymentTransactionId = deployed.deployTxData.public.txId;
   console.log('  ✅ Contract deployed successfully!\n');
   console.log(`  Contract Address: ${contractAddress}\n`);
+  console.log(`  Deployment Transaction ID: ${deploymentTransactionId}\n`);
 
-  recordDeployment(network, contractAddress, address.toString());
+  const verificationStartedAt = Date.now();
+  let deploymentVerification: Awaited<ReturnType<typeof findDeployedContract>> | undefined;
+  let verificationError: unknown;
+  while (Date.now() - verificationStartedAt < DEPLOYMENT_INDEXER_VERIFY_TIMEOUT_MS) {
+    try {
+      deploymentVerification = await findDeployedContract(providers as any, {
+        compiledContract: compiledVouchPolicy,
+        contractAddress,
+        privateStateId: VOUCH_PRIVATE_STATE_ID,
+        initialPrivateState: privateState,
+      });
+      break;
+    } catch (error) {
+      verificationError = error;
+      const elapsed = Math.round((Date.now() - verificationStartedAt) / 1000);
+      console.log(`  Waiting for Preprod indexer to expose deployment (${elapsed}s): ${error instanceof Error ? error.message : String(error)}`);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+  if (!deploymentVerification) {
+    throw new Error(
+      `Deployment transaction ${deploymentTransactionId} finalized at ${contractAddress}, but Preprod indexer verification did not complete within ${DEPLOYMENT_INDEXER_VERIFY_TIMEOUT_MS / 1000}s.` +
+      (verificationError instanceof Error ? ` Last error: ${verificationError.message}` : ''),
+    );
+  }
+
+  recordDeployment(network, contractAddress, address.toString(), deploymentTransactionId);
   console.log('  Saved to .midnight-state.json\n');
+  console.log(`  Verified contract address is queryable on ${network}.\n`);
 
   await persistWalletState(network, walletCtx);
   await walletCtx.wallet.stop();

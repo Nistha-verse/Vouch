@@ -10,8 +10,6 @@ export const AUTHORIZATION_REASON_CODES = [
   'invalid-intent',
   'per-transaction-limit',
   'daily-limit',
-  'category-not-allowed',
-  'recipient-not-allowed',
   'unsupported-action',
 ] as const;
 
@@ -20,8 +18,6 @@ export type AuthorizationReasonCode = (typeof AUTHORIZATION_REASON_CODES)[number
 export interface AuthorizationPolicy {
   readonly dailyLimit: bigint;
   readonly perTransactionLimit: bigint;
-  readonly allowedCategories?: readonly string[];
-  readonly allowedRecipients?: readonly string[];
 }
 
 export interface AgentAuthorizationState {

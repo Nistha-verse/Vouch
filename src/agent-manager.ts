@@ -2,6 +2,7 @@ import {
   AGENT_STATUSES,
   AGENT_TYPES,
   createAgentIdentity,
+  createAgentSecret,
   type AgentAuthorization,
   type AgentIdentity,
   type AgentStatus,
@@ -41,6 +42,7 @@ export class AgentManager {
   private readonly ownerId?: string;
   private readonly agents = new Map<string, AgentIdentity>();
   private readonly repository?: AgentRepository;
+  private readonly secrets = new Map<string, Uint8Array>();
 
   constructor(ownerId?: string, repository?: AgentRepository) {
     this.ownerId = ownerId;
@@ -59,6 +61,12 @@ export class AgentManager {
   getAgent(agentId: string): AgentIdentity | undefined {
     if (this.repository && this.ownerId) return this.repository.getAgent(this.ownerId, agentId);
     return this.agents.get(agentId);
+  }
+
+  getAgentSecret(agentId: string): Uint8Array | undefined {
+    if (this.repository && this.ownerId) return this.repository.getAgentSecret(this.ownerId, agentId);
+    const secret = this.secrets.get(agentId);
+    return secret ? new Uint8Array(secret) : undefined;
   }
 
   forUser(ownerId: string): AgentManager {
@@ -145,6 +153,7 @@ export class AgentManager {
       type: typeResult.value,
       status: 'inactive',
     });
+    const secret = createAgentSecret();
 
     if (this.agents.has(identity.agentId)) {
       return {
@@ -159,9 +168,10 @@ export class AgentManager {
 
     if (this.repository && this.ownerId) {
       this.repository.ensureUser(this.ownerId);
-      this.repository.createAgent(this.ownerId, identity);
+      this.repository.createAgentCredential(this.ownerId, identity, secret);
     } else {
       this.agents.set(identity.agentId, identity);
+      this.secrets.set(identity.agentId, secret);
     }
     return { ok: true, value: identity };
   }

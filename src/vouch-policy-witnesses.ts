@@ -4,10 +4,8 @@ export type VouchPrivateState = {
   readonly dailyLimit: bigint;
   readonly perTransactionLimit: bigint;
   readonly spentToday: bigint;
-  readonly allowedRecipientCommitment: Uint8Array;
-  readonly allowedCategoryCommitment: Uint8Array;
   readonly ownerSecret: Uint8Array;
-  readonly agentSecret: Uint8Array;
+  readonly agentSecrets: readonly [Uint8Array, Uint8Array, Uint8Array, Uint8Array];
 };
 
 export const createVouchPrivateState = (
@@ -16,10 +14,13 @@ export const createVouchPrivateState = (
   dailyLimit: state.dailyLimit,
   perTransactionLimit: state.perTransactionLimit,
   spentToday: state.spentToday,
-  allowedRecipientCommitment: new Uint8Array(state.allowedRecipientCommitment),
-  allowedCategoryCommitment: new Uint8Array(state.allowedCategoryCommitment),
   ownerSecret: new Uint8Array(state.ownerSecret),
-  agentSecret: new Uint8Array(state.agentSecret),
+  agentSecrets: [
+    new Uint8Array(state.agentSecrets[0]),
+    new Uint8Array(state.agentSecrets[1]),
+    new Uint8Array(state.agentSecrets[2]),
+    new Uint8Array(state.agentSecrets[3]),
+  ],
 });
 
 export const witnesses = {
@@ -29,17 +30,17 @@ export const witnesses = {
     privateState,
     privateState.ownerSecret,
   ],
-  getAgentSecret: ({
+  getTaskAgentSecret: ({
     privateState,
-  }: WitnessContext<unknown, VouchPrivateState>): [VouchPrivateState, Uint8Array] => [
-    privateState,
-    privateState.agentSecret,
-  ],
+  }: WitnessContext<unknown, VouchPrivateState>): [VouchPrivateState, Uint8Array] => [privateState, privateState.agentSecrets[0]],
+  getResearchAgentSecret: ({ privateState }: WitnessContext<unknown, VouchPrivateState>): [VouchPrivateState, Uint8Array] => [privateState, privateState.agentSecrets[1]],
+  getDeveloperAgentSecret: ({ privateState }: WitnessContext<unknown, VouchPrivateState>): [VouchPrivateState, Uint8Array] => [privateState, privateState.agentSecrets[2]],
+  getCustomAgentSecret: ({ privateState }: WitnessContext<unknown, VouchPrivateState>): [VouchPrivateState, Uint8Array] => [privateState, privateState.agentSecrets[3]],
   getPolicy: ({
     privateState,
   }: WitnessContext<unknown, VouchPrivateState>, amount: bigint): [
     VouchPrivateState,
-    [bigint, bigint, bigint, Uint8Array, Uint8Array],
+    [bigint, bigint, bigint],
   ] => [
     // Midnight.js persists this next private state only when the enclosing
     // transaction succeeds. It is private client state, not a globally shared
@@ -52,8 +53,6 @@ export const witnesses = {
       privateState.dailyLimit,
       privateState.perTransactionLimit,
       privateState.spentToday,
-      privateState.allowedRecipientCommitment,
-      privateState.allowedCategoryCommitment,
     ],
   ],
 };

@@ -27,6 +27,7 @@ export interface NetworkConfig {
 
 export interface DeploymentRecord {
   address: string;
+  transactionId?: string;
   deployedAt: string;
   deployer: string;
 }
@@ -154,7 +155,7 @@ export interface ResolveOptions {
   cwd?: string;
 }
 
-export type ResolveSource = 'flag' | 'state' | 'default';
+export type ResolveSource = 'flag' | 'env' | 'state' | 'default';
 
 export interface ResolveResult {
   network: NetworkId;
@@ -191,6 +192,12 @@ export function resolveNetwork(opts: ResolveOptions = {}): ResolveResult {
   if (flag) {
     network = flag;
     source = 'flag';
+  } else if (env.VOUCH_NETWORK) {
+    if (!isNetworkId(env.VOUCH_NETWORK)) {
+      throw new Error(`Unknown VOUCH_NETWORK: ${env.VOUCH_NETWORK}. Supported: ${NETWORK_IDS.join(', ')}.`);
+    }
+    network = env.VOUCH_NETWORK;
+    source = 'env';
   } else {
     const state = loadState({ cwd });
     if (state) {
@@ -350,6 +357,7 @@ export function recordDeployment(
   network: NetworkId,
   address: string,
   deployer: string,
+  transactionId?: string,
   opts: FsOptions = {},
 ): void {
   const cwd = opts.cwd ?? process.cwd();
@@ -362,7 +370,12 @@ export function recordDeployment(
   };
   next.deployments = {
     ...next.deployments,
-    [network]: { address, deployer, deployedAt: new Date().toISOString() },
+    [network]: {
+      address,
+      deployer,
+      deployedAt: new Date().toISOString(),
+      ...(transactionId ? { transactionId } : {}),
+    },
   };
   saveState(next, { cwd });
 }

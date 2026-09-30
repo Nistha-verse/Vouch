@@ -30,17 +30,6 @@ export interface CreateAgentIdentityInput {
   readonly status?: AgentStatus;
 }
 
-function stableHash(value: string): number {
-  let hash = 2166136261;
-
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  return hash >>> 0;
-}
-
 export function createAgentIdentity(input: CreateAgentIdentityInput): AgentIdentity {
   const name = input.name.trim();
   if (!name) {
@@ -58,17 +47,18 @@ export function createAgentIdentity(input: CreateAgentIdentityInput): AgentIdent
   }
 
   const createdAt = new Date().toISOString();
-  const agentIdSeed = `${name}|${createdAt}|${type}|${status}`;
-  const uniqueHash = stableHash(agentIdSeed);
-
   return {
-    agentId: `agent-${uniqueHash.toString(16).padStart(8, '0')}`,
+    agentId: `agent-${randomBytes(4).toString('hex')}`,
     name,
     type,
     status,
     createdAt,
     authorization: { status: 'unauthorized' },
   };
+}
+
+export function createAgentSecret(): Uint8Array {
+  return randomBytes(32);
 }
 
 export function isAuthorizedAgent(
@@ -80,3 +70,4 @@ export function isAuthorizedAgent(
 export function getAgentCommitment(agent: AgentIdentity): string | undefined {
   return isAuthorizedAgent(agent) ? agent.authorization.commitment : undefined;
 }
+import { randomBytes } from 'node:crypto';

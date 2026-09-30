@@ -1,9 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { createApp } from '../src/server/app.js';
 import { signingKeyFromBip340, signData, signatureVerifyingKey } from '@midnight-ntwrk/midnight-js-protocol/ledger';
+import { createHash } from 'node:crypto';
 
 async function run() {
-  const { fastify } = createApp({ databasePath: ':memory:' });
+  const { fastify, services } = createApp({ databasePath: ':memory:' });
   const challengeResponse = await fastify.inject({ method: 'POST', url: '/api/auth/challenge' });
   const challenge = JSON.parse(challengeResponse.payload) as { challenge: string };
   const key = signingKeyFromBip340(new Uint8Array(32).fill(7));
@@ -31,6 +32,37 @@ async function run() {
   const agent = JSON.parse(create.payload);
   assert.ok(agent.agentId, 'no agentId');
 
+  // Custom Agent credentials are issued once, stored as hashes, and scoped to their agent.
+  const customCreate = await fastify.inject({ method: 'POST', url: '/api/agents', headers, payload: { name: 'External Researcher', type: 'custom' } });
+  assert.equal(customCreate.statusCode, 201, customCreate.payload);
+  const customAgent = JSON.parse(customCreate.payload);
+  const credentialResponse = await fastify.inject({ method: 'POST', url: `/api/agents/${customAgent.agentId}/credential`, headers });
+  assert.equal(credentialResponse.statusCode, 200, credentialResponse.payload);
+  const { credential } = JSON.parse(credentialResponse.payload) as { credential: string };
+  const storedCredential = services.repository.db.prepare('SELECT api_credential_hash FROM agents WHERE agent_id = ?').get(customAgent.agentId) as { api_credential_hash: string };
+  assert.notEqual(storedCredential.api_credential_hash, credential);
+  assert.equal(storedCredential.api_credential_hash, createHash('sha256').update(credential).digest('hex'));
+  const invalidConnect = await fastify.inject({ method: 'POST', url: '/api/custom-agent/connect', payload: { agentId: customAgent.agentId, credential: 'invalid' } });
+  assert.equal(invalidConnect.statusCode, 401);
+  const customActivate = await fastify.inject({ method: 'POST', url: `/api/agents/${customAgent.agentId}/activate`, headers });
+  assert.equal(customActivate.statusCode, 200, customActivate.payload);
+  const customConnect = await fastify.inject({ method: 'POST', url: '/api/custom-agent/connect', payload: { agentId: customAgent.agentId, credential } });
+  assert.equal(customConnect.statusCode, 200, customConnect.payload);
+  const customSession = JSON.parse(customConnect.payload) as { token: string };
+  const customProposal = await fastify.inject({
+    method: 'POST',
+    url: '/api/custom-agent/propose',
+    headers: { authorization: `Vouch-Agent ${customSession.token}` },
+    payload: { action: 'observe', subject: 'Inspect the deployment status' },
+  });
+  assert.equal(customProposal.statusCode, 200, customProposal.payload);
+  assert.equal(JSON.parse(customProposal.payload).agentId, customAgent.agentId);
+
+  assert.equal(services.repository.claimContractAgentSlot('task', 'user-a', 'agent-a'), true);
+  assert.equal(services.repository.claimContractAgentSlot('task', 'user-b', 'agent-b'), false);
+  services.repository.releaseContractAgentSlot('task', 'user-a', 'agent-a');
+  assert.equal(services.repository.claimContractAgentSlot('task', 'user-b', 'agent-b'), true);
+
   // List
   const list = await fastify.inject({ method: 'GET', url: '/api/agents', headers });
   assert.equal(list.statusCode, 200);
@@ -51,7 +83,7 @@ async function run() {
   const badAmount = await fastify.inject({ method: 'POST', url: '/api/authorization/check', headers, payload: { agentId: agent.agentId, kind: 'proposal', action: 'spend', amount: '1.23', recipient: 'x', category: 'y', reason: 'z' } });
   assert.equal(badAmount.statusCode, 400);
 
-  // Spend is rejected when no authorization policy allows the agent.
+  // Spend is rejected when no spending-safety policy is configured for the agent.
   const authorization = await fastify.inject({
     method: 'POST',
     url: '/api/authorization/check',

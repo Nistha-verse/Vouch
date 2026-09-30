@@ -66,8 +66,20 @@ async function localApiFlow(): Promise<void> {
       method: 'PUT',
       url: `/api/agents/${agent.agentId}/policy`,
       headers: alice.headers,
-      payload: { dailyLimit: '10', perTransactionLimit: '5', allowedRecipients: ['vendor'], allowedCategories: ['api'] },
+      payload: { dailyLimit: '10', perTransactionLimit: '5' },
     })).statusCode, 200);
+    const unauthenticatedProposal = await fastify.inject({
+      method: 'POST',
+      url: '/api/authorization/check',
+      headers: alice.headers,
+      payload: {
+        kind: 'proposal', agentId: agent.agentId, action: 'spend', amount: '2',
+        recipient: 'vendor', category: 'api', reason: 'must require agent authorization',
+      },
+    });
+    assert.equal(unauthenticatedProposal.statusCode, 403, unauthenticatedProposal.payload);
+    assert.match(unauthenticatedProposal.payload, /not authorized/i);
+    services.agentManager.forUser(alice.userId).authorizeAgent(agent.agentId, 'e2e-authorized-agent');
 
     const validProposal = {
       kind: 'proposal',
@@ -96,23 +108,21 @@ async function localApiFlow(): Promise<void> {
     assert.equal(rejected.statusCode, 403, rejected.payload);
     assert.match(rejected.payload, /per-transaction/i);
 
-    const wrongRecipient = await fastify.inject({
+    const differentRecipient = await fastify.inject({
       method: 'POST',
       url: '/api/authorization/check',
       headers: alice.headers,
       payload: { ...validProposal, recipient: 'other-vendor' },
     });
-    assert.equal(wrongRecipient.statusCode, 403, wrongRecipient.payload);
-    assert.match(wrongRecipient.payload, /recipient/i);
+    assert.equal(differentRecipient.statusCode, 200, differentRecipient.payload);
 
-    const wrongCategory = await fastify.inject({
+    const differentCategory = await fastify.inject({
       method: 'POST',
       url: '/api/authorization/check',
       headers: alice.headers,
       payload: { ...validProposal, category: 'travel' },
     });
-    assert.equal(wrongCategory.statusCode, 403, wrongCategory.payload);
-    assert.match(wrongCategory.payload, /category/i);
+    assert.equal(differentCategory.statusCode, 200, differentCategory.payload);
 
     // Leave only 1 unit of daily budget so a valid per-tx amount of 2 is rejected.
     services.repository.recordSpend(alice.userId, agent.agentId, 9n);

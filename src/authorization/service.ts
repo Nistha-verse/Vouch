@@ -73,6 +73,10 @@ export class AuthorizationService {
       return rejected(agentId, 'unknown', 'unsupported-action', 'The requested action is not supported.');
     }
 
+    if (agent.authorization.status !== 'authorized') {
+      return rejected(agentId, intent.action, 'agent-not-authorized', `Agent ${agentId} is not authorized.`);
+    }
+
     const state = this.policies.get(agentId);
     if (!state) {
       return rejected(agentId, intent.action, 'agent-not-authorized', 'No authorization policy is configured for this agent.');
@@ -103,16 +107,6 @@ export class AuthorizationService {
 
     if (state.spentToday + intent.amount > state.policy.dailyLimit) {
       return rejected(agentId, intent.action, 'daily-limit', 'The amount exceeds the remaining daily spending limit.');
-    }
-
-    const canonicalCategoryValue = canonicalCategory(intent.category);
-    const canonicalRecipientValue = canonicalRecipient(intent.recipient);
-    if (state.policy.allowedCategories && !state.policy.allowedCategories.includes(canonicalCategoryValue)) {
-      return rejected(agentId, intent.action, 'category-not-allowed', 'The spend category is not allowed by policy.');
-    }
-
-    if (state.policy.allowedRecipients && !state.policy.allowedRecipients.includes(canonicalRecipientValue)) {
-      return rejected(agentId, intent.action, 'recipient-not-allowed', 'The recipient is not allowed by policy.');
     }
 
     // This is only deterministic application pre-validation for UX. Compact/
@@ -215,8 +209,6 @@ function validatePolicyState(state: AgentAuthorizationState): void {
   if (state.spentToday > state.policy.dailyLimit) {
     throw new Error('spentToday cannot exceed the daily limit.');
   }
-  validatePolicyList(state.policy.allowedCategories, 'category');
-  validatePolicyList(state.policy.allowedRecipients, 'recipient');
 }
 
 function cloneAuthorizationState(state: AgentAuthorizationState): AgentAuthorizationState {
@@ -225,23 +217,8 @@ function cloneAuthorizationState(state: AgentAuthorizationState): AgentAuthoriza
     policy: {
       dailyLimit: state.policy.dailyLimit,
       perTransactionLimit: state.policy.perTransactionLimit,
-      ...(state.policy.allowedCategories
-        ? { allowedCategories: [...state.policy.allowedCategories] }
-        : {}),
-      ...(state.policy.allowedRecipients
-        ? { allowedRecipients: [...state.policy.allowedRecipients] }
-        : {}),
     },
   };
-}
-
-function validatePolicyList(values: readonly string[] | undefined, field: string): void {
-  if (!values) return;
-  for (const value of values) {
-    if (!isBoundedText(value, field === 'category' ? MAX_CATEGORY_LENGTH : MAX_RECIPIENT_LENGTH)) {
-      throw new Error(`Allowed ${field} values must be non-empty and within the maximum length.`);
-    }
-  }
 }
 
 function isBoundedText(value: unknown, maxLength: number): value is string {

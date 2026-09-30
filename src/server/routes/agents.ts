@@ -3,6 +3,7 @@ import type { AgentManager } from '../../agent-manager.js';
 import type { AgentRepository } from '../../persistence/database.js';
 import { scopedManager, userId } from '../request-context.js';
 import type { WalletAuthService } from '../auth.js';
+import { createHash, randomBytes } from 'node:crypto';
 
 function isValidAgentType(v: unknown): v is 'developer' | 'research' | 'task' | 'custom' {
   return v === 'developer' || v === 'research' || v === 'task' || v === 'custom';
@@ -13,6 +14,22 @@ function statusFor(code: string): number {
 }
 
 export function registerAgentRoutes(fastify: FastifyInstance, manager: AgentManager, repository: AgentRepository, auth: WalletAuthService) {
+  fastify.post('/api/agents/:agentId/credential', async (request, reply) => {
+    const owner = userId(request, reply, auth);
+    if (!owner) return;
+    const { agentId } = request.params as { agentId: string };
+    const agent = manager.forUser(owner).getAgent(agentId);
+    if (!agent) return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Agent was not found.' } });
+    if (agent.type !== 'custom') return reply.status(400).send({ error: { code: 'custom-agent-required', message: 'API credentials are only available for Custom Agents.' } });
+    const credential = randomBytes(32).toString('base64url');
+    const credentialHash = createHash('sha256').update(credential).digest('hex');
+    if (!repository.setAgentCredentialHash(owner, agentId, credentialHash)) {
+      return reply.status(404).send({ error: { code: 'agent-not-found', message: 'Custom Agent was not found.' } });
+    }
+    reply.header('cache-control', 'no-store');
+    return { agentId, credential, connectEndpoint: '/api/custom-agent/connect' };
+  });
+
   fastify.post('/api/agents', async (request, reply) => {
     const owner = userId(request, reply, auth);
     if (!owner) return;

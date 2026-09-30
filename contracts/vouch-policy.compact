@@ -3,7 +3,10 @@ pragma language_version >= 0.23;
 import CompactStandardLibrary;
 
 export ledger ownerCommitment: Bytes<32>;
-export ledger authorizedAgentCommitment: Bytes<32>;
+export ledger taskAgentCommitment: Bytes<32>;
+export ledger researchAgentCommitment: Bytes<32>;
+export ledger developerAgentCommitment: Bytes<32>;
+export ledger customAgentCommitment: Bytes<32>;
 
 constructor() {
     ownerCommitment = disclose(persistentHash<Bytes<32>>(getOwnerSecret()));
@@ -11,54 +14,78 @@ constructor() {
 
 // The owner secret and agent secret are private witness values.
 witness getOwnerSecret(): Bytes<32>;
-witness getAgentSecret(): Bytes<32>;
+witness getTaskAgentSecret(): Bytes<32>;
+witness getResearchAgentSecret(): Bytes<32>;
+witness getDeveloperAgentSecret(): Bytes<32>;
+witness getCustomAgentSecret(): Bytes<32>;
 
-// Private policy values are supplied by the DApp witness at proof time.
-// Recipient/category commitments are a singleton allowlist in this milestone.
-witness getPolicy(amount: Uint<64>): [
-    Uint<64>,
-    Uint<64>,
-    Uint<64>,
-    Bytes<32>,
-    Bytes<32>
-];
+// Private spending limits and accounting are supplied by the DApp witness.
+witness getPolicy(amount: Uint<64>): [Uint<64>, Uint<64>, Uint<64>];
 
-export circuit authorizeAgent(agentCommitment: Bytes<32>): [] {
+export circuit authorizeTaskAgent(agentCommitment: Bytes<32>): [] {
     assert(
         ownerCommitment == persistentHash<Bytes<32>>(getOwnerSecret()),
         "Only the owner can authorize an agent"
     );
     assert(agentCommitment != ownerCommitment, "Owner cannot authorize itself as agent");
-    authorizedAgentCommitment = disclose(agentCommitment);
+    taskAgentCommitment = disclose(agentCommitment);
+}
+
+export circuit authorizeResearchAgent(agentCommitment: Bytes<32>): [] {
+    assert(ownerCommitment == persistentHash<Bytes<32>>(getOwnerSecret()), "Only the owner can authorize an agent");
+    assert(agentCommitment != ownerCommitment, "Owner cannot authorize itself as agent");
+    researchAgentCommitment = disclose(agentCommitment);
+}
+
+export circuit authorizeDeveloperAgent(agentCommitment: Bytes<32>): [] {
+    assert(ownerCommitment == persistentHash<Bytes<32>>(getOwnerSecret()), "Only the owner can authorize an agent");
+    assert(agentCommitment != ownerCommitment, "Owner cannot authorize itself as agent");
+    developerAgentCommitment = disclose(agentCommitment);
+}
+
+export circuit authorizeCustomAgent(agentCommitment: Bytes<32>): [] {
+    assert(ownerCommitment == persistentHash<Bytes<32>>(getOwnerSecret()), "Only the owner can authorize an agent");
+    assert(agentCommitment != ownerCommitment, "Owner cannot authorize itself as agent");
+    customAgentCommitment = disclose(agentCommitment);
 }
 
 // Authorize a spend request. This circuit does not transfer funds.
-export circuit requestSpend(
+export circuit requestTaskSpend(
     amount: Uint<64>,
     recipientCommitment: Bytes<32>,
     categoryCommitment: Bytes<32>
 ): [] {
     assert(
-        authorizedAgentCommitment == persistentHash<Bytes<32>>(getAgentSecret()),
+        taskAgentCommitment == persistentHash<Bytes<32>>(getTaskAgentSecret()),
         "Agent is not authorized"
     );
     assert(amount > 0, "Amount must be greater than zero");
-    const [
-        dailyLimit,
-        perTransactionLimit,
-        spentToday,
-        allowedRecipientCommitment,
-        allowedCategoryCommitment
-    ] = getPolicy(amount);
+    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
 
     assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
     assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
-    assert(
-        recipientCommitment == allowedRecipientCommitment,
-        "Recipient is not allowed"
-    );
-    assert(
-        categoryCommitment == allowedCategoryCommitment,
-        "Category is not allowed"
-    );
+}
+
+export circuit requestResearchSpend(amount: Uint<64>, recipientCommitment: Bytes<32>, categoryCommitment: Bytes<32>): [] {
+    assert(researchAgentCommitment == persistentHash<Bytes<32>>(getResearchAgentSecret()), "Agent is not authorized");
+    assert(amount > 0, "Amount must be greater than zero");
+    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
+    assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
+    assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
+}
+
+export circuit requestDeveloperSpend(amount: Uint<64>, recipientCommitment: Bytes<32>, categoryCommitment: Bytes<32>): [] {
+    assert(developerAgentCommitment == persistentHash<Bytes<32>>(getDeveloperAgentSecret()), "Agent is not authorized");
+    assert(amount > 0, "Amount must be greater than zero");
+    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
+    assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
+    assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
+}
+
+export circuit requestCustomSpend(amount: Uint<64>, recipientCommitment: Bytes<32>, categoryCommitment: Bytes<32>): [] {
+    assert(customAgentCommitment == persistentHash<Bytes<32>>(getCustomAgentSecret()), "Agent is not authorized");
+    assert(amount > 0, "Amount must be greater than zero");
+    const [dailyLimit, perTransactionLimit, spentToday] = getPolicy(amount);
+    assert(amount <= perTransactionLimit, "Amount exceeds per-transaction limit");
+    assert(spentToday + amount <= dailyLimit, "Amount exceeds daily limit");
 }

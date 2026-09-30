@@ -93,3 +93,16 @@ export function clearWalletState(network: NetworkId, opts: FsOptions = {}): void
   const dir = networkDir(network, opts);
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 }
+
+export function quarantineWalletState(network: NetworkId, opts: FsOptions = {}): string | undefined {
+  if (network !== 'preprod') {
+    throw new Error('Automatic wallet-state quarantine is restricted to Preprod.');
+  }
+  const dir = networkDir(network, opts);
+  if (!fs.existsSync(dir)) return undefined;
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = path.join(path.dirname(dir), `preprod.stalled-${timestamp}-${process.pid}`);
+  fs.renameSync(dir, backup);
+  return backup;
+}
