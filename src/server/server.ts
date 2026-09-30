@@ -24,7 +24,9 @@ async function main() {
     }
     const deployment = getDeployment(resolved.network);
     if (!deployment) {
-      throw new Error('No Vouch Preprod deployment is recorded in .midnight-state.json.');
+      throw new Error(
+        'No Vouch Preprod deployment is available. Record one in .midnight-state.json (local dev) or set VOUCH_CONTRACT_ADDRESS (production).',
+      );
     }
     networkInfo = { network: resolved.network, deployment };
   } catch (error) {

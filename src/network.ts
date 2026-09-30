@@ -87,6 +87,49 @@ export interface FsOptions {
   cwd?: string;
 }
 
+/**
+ * Resolve a Preprod deployment from the non-secret environment fallback.
+ *
+ * Railway has no `.midnight-state.json` (it holds wallet secrets), so this
+ * supplies the Preprod deployment from required/optional env vars. Only the
+ * contract address is required; the deployment tx, deployer, and deployed-at
+ * are optional. No wallet secrets pass through this path.
+ */
+function resolveEnvDeployment(env: NodeJS.ProcessEnv): DeploymentRecord | null {
+  const contractAddress = env.VOUCH_CONTRACT_ADDRESS?.trim();
+  if (!contractAddress) return null;
+
+  const transactionId = env.VOUCH_DEPLOYMENT_TX?.trim() || undefined;
+  const deployedAt = env.VOUCH_DEPLOYED_AT?.trim() || undefined;
+  const deployer =
+    env.VOUCH_DEPLOYER?.trim() ||
+    `0x${'0'.repeat(40)}`;
+
+  return {
+    address: contractAddress,
+    transactionId,
+    deployedAt: deployedAt || new Date().toISOString(),
+    deployer,
+  };
+}
+
+
+export function getDeployment(network: NetworkId, opts: FsOptions = {}): DeploymentRecord | null {
+  const state = loadState(opts);
+  if (state?.deployments?.[network]) return state.deployments[network];
+
+  // Railway (and other hosted environments without the gitignored state file)
+  // can supply a Preprod deployment from the non-secret env fallback.
+  if (network === 'preprod') {
+    const env = process.env;
+    if (env.VOUCH_CONTRACT_ADDRESS) {
+      return resolveEnvDeployment(env);
+    }
+  }
+
+  return null;
+}
+
 function statePath(opts: FsOptions = {}): string {
   return path.join(opts.cwd ?? process.cwd(), STATE_FILE_NAME);
 }
@@ -346,11 +389,6 @@ export function formatWalletBackupNotice(
     `  restores the same wallet in Lace, and is saved to ${STATE_FILE_NAME} (gitignored).`,
     '',
   ].join('\n');
-}
-
-export function getDeployment(network: NetworkId, opts: FsOptions = {}): DeploymentRecord | null {
-  const state = loadState(opts);
-  return state?.deployments?.[network] ?? null;
 }
 
 export function recordDeployment(
