@@ -1,4 +1,7 @@
 {
+  "buildCommand": "pnpm run frontend:build",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "outputDirectory": "frontend/dist",
   "rewrites": [
     {
       "source": "/api/:path*",
