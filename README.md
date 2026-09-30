@@ -438,6 +438,8 @@ that deployment. The backend resolves the deployment from shared state, the
 frontend reads it from `/api/network`, and no contract address is hardcoded
 in either.
 
-Product X profile: **[TODO: add the official Product X profile link]**
+Product X profile: **https://x.com/Vouch_midnight**
 
-Live demo: **[TODO: add the live demo link]**
+Live demo: **https://drive.google.com/file/d/1szeLpk-4-TJnSwW2dQ_m0ZxNGrjEQA5c/view?usp=sharing**
+
+Live website link: **https://vouch-roan-two.vercel.app/**
