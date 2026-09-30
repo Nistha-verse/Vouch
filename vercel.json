@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://proactive-celebration-production-b9ef.up.railway.app/api/:path*"
+    }
+  ]
+}
